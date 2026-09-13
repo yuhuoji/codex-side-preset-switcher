@@ -1,0 +1,5 @@
+.DS_Store
+*.log
+codex-side-preset-state.json
+config.toml
+config.toml.*backup*
