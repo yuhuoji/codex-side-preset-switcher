@@ -381,22 +381,6 @@ local function readEffortIndex(root)
   return type(found) == "number" and found or nil
 end
 
-local function pollForEffortIndex(context, expected, callback, attempt)
-  attempt = attempt or 1
-  local _, popoverRoot = strengthPopover(context)
-  if popoverRoot and readEffortIndex(popoverRoot) == expected then
-    callback(true, popoverRoot)
-    return
-  end
-  if attempt >= 8 then
-    callback(false, popoverRoot)
-    return
-  end
-  hs.timer.doAfter(0.1, function()
-    pollForEffortIndex(context, expected, callback, attempt + 1)
-  end)
-end
-
 local function writeSideState(presetKey, windowTitle)
   local tempPath = codexSideStatePath .. ".tmp"
   local payload = hs.json.encode({
@@ -502,7 +486,7 @@ local function applyPresetAttempt(presetKey, preset, configBefore, context, atte
               return
             end
 
-            local function adjustAndVerify(retry)
+            local function adjustAndVerify()
               local focusedWindow = refreshed.app:focusedWindow()
               if not refreshed.app:isFrontmost()
                   or not focusedWindow
@@ -533,51 +517,40 @@ local function applyPresetAttempt(presetKey, preset, configBefore, context, atte
                 end
               end
 
-              pollForEffortIndex(refreshed, preset.effortIndex, function(matched, activeRoot)
-                if not matched then
-                  local activeItem = strengthPopover(refreshed)
-                  if retry == 0 and activeItem then
-                    focusAXElement(activeRoot, refreshed.root, function(retryFocused)
-                      if retryFocused then
-                        hs.timer.doAfter(0.15, function()
-                          adjustAndVerify(1)
-                        end)
-                      else
-                        finishPreset(false, "重试时无法聚焦侧栏的推理强度控件")
-                      end
-                    end)
-                    return
-                  end
-                  finishPreset(false, "方向键调整后强度回读不一致")
+              -- The popover's announced index can lag behind the visible
+              -- slider. Do not treat that transient value as a reason to send
+              -- a second key sequence: doing so visibly resets to the lowest
+              -- stop and applies the target again. Submit once, then verify
+              -- the collapsed side-composer control, which reflects the
+              -- committed value.
+              hs.timer.doAfter(0.35, function()
+                if not commitSidePopover(refreshed) then
+                  finishPreset(false, "无法提交侧栏的推理强度选择")
                   return
                 end
-              if not commitSidePopover(refreshed) then
-                finishPreset(false, "无法提交侧栏的推理强度选择")
-                return
-              end
-              hs.timer.doAfter(0.45, function()
-              if strengthPopover(refreshed) then
-                finishPreset(false, "推理强度弹窗未能自动关闭")
-                return
-              end
-              local verifiedContext = findSideContext(refreshed.window)
-              if not verifiedContext or not verifyPreset(verifiedContext, preset) then
-                finishPreset(false, "设置后回读不一致；未记录最近应用状态")
-                return
-              end
-              if readFile(codexConfigPath) ~= configBefore then
-                finishPreset(false, "检测到 config.toml 发生变化；已拒绝记录状态")
-                return
-              end
-              local windowTitle = verifiedContext.window and verifiedContext.window:title() or ""
-              if not writeSideState(presetKey, windowTitle) then
-                finishPreset(false, "侧栏已切换，但状态文件写入失败")
-                return
-              end
-              refreshSwiftBarCodexPlugin()
-              codexSideActiveContext = verifiedContext
-              finishPreset(true, "已应用 " .. preset.label .. "；全局配置未变化")
-              end)
+                hs.timer.doAfter(0.45, function()
+                  if strengthPopover(refreshed) then
+                    finishPreset(false, "推理强度弹窗未能自动关闭")
+                    return
+                  end
+                  local verifiedContext = findSideContext(refreshed.window)
+                  if not verifiedContext or not verifyPreset(verifiedContext, preset) then
+                    finishPreset(false, "设置后回读不一致；未记录最近应用状态")
+                    return
+                  end
+                  if readFile(codexConfigPath) ~= configBefore then
+                    finishPreset(false, "检测到 config.toml 发生变化；已拒绝记录状态")
+                    return
+                  end
+                  local windowTitle = verifiedContext.window and verifiedContext.window:title() or ""
+                  if not writeSideState(presetKey, windowTitle) then
+                    finishPreset(false, "侧栏已切换，但状态文件写入失败")
+                    return
+                  end
+                  refreshSwiftBarCodexPlugin()
+                  codexSideActiveContext = verifiedContext
+                  finishPreset(true, "已应用 " .. preset.label .. "；全局配置未变化")
+                end)
               end)
             end
 
@@ -586,7 +559,7 @@ local function applyPresetAttempt(presetKey, preset, configBefore, context, atte
                 finishPreset(false, "无法聚焦侧栏的推理强度控件")
                 return
               end
-              adjustAndVerify(0)
+              adjustAndVerify()
             end)
           end)
         end
@@ -686,4 +659,3 @@ hs.urlevent.bind("codex-side-open", function()
     codexNotify("侧栏已打开；尚无最近应用预设")
   end)
 end)
-
