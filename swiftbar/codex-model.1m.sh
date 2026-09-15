@@ -1,8 +1,8 @@
 #!/bin/zsh
 
 # <swiftbar.title>Codex Model Presets</swiftbar.title>
-# <swiftbar.version>v1.3.0</swiftbar.version>
-# <swiftbar.desc>Switch new-task defaults or the current Codex side chat preset.</swiftbar.desc>
+# <swiftbar.version>v1.4.0</swiftbar.version>
+# <swiftbar.desc>Switch new-task defaults or the current Codex main/side composer preset.</swiftbar.desc>
 # <swiftbar.refreshOnOpen>true</swiftbar.refreshOnOpen>
 
 set -eu
@@ -10,6 +10,7 @@ set -eu
 readonly CODEX_CONFIG_DIR="${CODEX_HOME:-$HOME/.codex}"
 readonly CONFIG_FILE="$CODEX_CONFIG_DIR/config.toml"
 readonly BACKUP_FILE="$CODEX_CONFIG_DIR/config.toml.swiftbar-backup"
+readonly MAIN_STATE_FILE="$CODEX_CONFIG_DIR/codex-main-preset-state.json"
 readonly SIDE_STATE_FILE="$CODEX_CONFIG_DIR/codex-side-preset-state.json"
 readonly SCRIPT_FILE="${0:A}"
 
@@ -89,15 +90,16 @@ checked_if() {
   fi
 }
 
-side_state_name() {
+preset_state_name() {
+  local state_file="$1"
   local contents preset
 
-  [[ -f "$SIDE_STATE_FILE" && ! -L "$SIDE_STATE_FILE" ]] || {
+  [[ -f "$state_file" && ! -L "$state_file" ]] || {
     print -r -- "尚未应用"
     return
   }
 
-  contents="$(<"$SIDE_STATE_FILE")"
+  contents="$(<"$state_file")"
   if [[ "$contents" =~ '"preset"[[:space:]]*:[[:space:]]*"([^"]+)"' ]]; then
     preset="${match[1]}"
     case "$preset" in
@@ -136,7 +138,8 @@ current_model="$(read_setting model)"
 current_effort="$(read_setting model_reasoning_effort)"
 current_key="$current_model:$current_effort"
 current_name="$(display_name "$current_model" "$current_effort")"
-side_name="$(side_state_name)"
+main_name="$(preset_state_name "$MAIN_STATE_FILE")"
+side_name="$(preset_state_name "$SIDE_STATE_FILE")"
 
 print -r -- "Codex: $current_name"
 print -r -- "---"
@@ -145,6 +148,13 @@ print -r -- "Luna Max | bash=$SCRIPT_FILE param1=global param2=luna-max terminal
 print -r -- "Terra High | bash=$SCRIPT_FILE param1=global param2=terra-high terminal=false refresh=true checked=$(checked_if "$current_key" 'gpt-5.6-terra:high')"
 print -r -- "Sol Medium | bash=$SCRIPT_FILE param1=global param2=sol-medium terminal=false refresh=true checked=$(checked_if "$current_key" 'gpt-5.6-sol:medium')"
 print -r -- "Sol High | bash=$SCRIPT_FILE param1=global param2=sol-high terminal=false refresh=true checked=$(checked_if "$current_key" 'gpt-5.6-sol:high')"
+print -r -- "---"
+print -r -- "当前主线程 | disabled=true"
+print -r -- "最近成功：$main_name | disabled=true size=11"
+print -r -- "Luna Max | bash=/usr/bin/open param1=-g param2=hammerspoon://codex-main-preset?preset=luna-max terminal=false refresh=true"
+print -r -- "Terra High | bash=/usr/bin/open param1=-g param2=hammerspoon://codex-main-preset?preset=terra-high terminal=false refresh=true"
+print -r -- "Sol Medium | bash=/usr/bin/open param1=-g param2=hammerspoon://codex-main-preset?preset=sol-medium terminal=false refresh=true"
+print -r -- "Sol High | bash=/usr/bin/open param1=-g param2=hammerspoon://codex-main-preset?preset=sol-high terminal=false refresh=true"
 print -r -- "---"
 print -r -- "当前侧栏 | disabled=true"
 print -r -- "最近成功：$side_name | disabled=true size=11"
@@ -156,4 +166,3 @@ print -r -- "打开侧栏并应用最近预设 | bash=/usr/bin/open param1=-g pa
 print -r -- "---"
 print -r -- "全局配置：$current_name（仅新任务） | disabled=true size=11"
 print -r -- "Open config.toml | bash=/usr/bin/open param1=-a param2=TextEdit param3=$CONFIG_FILE terminal=false"
-

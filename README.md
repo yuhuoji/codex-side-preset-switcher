@@ -2,7 +2,7 @@
 
 [English](README_EN.md) | 简体中文
 
-一个用于切换 Codex Desktop 当前侧栏模型与推理强度的 macOS 菜单栏工具。
+一个用于切换 Codex Desktop 当前主线程或侧栏模型与推理强度的 macOS 菜单栏工具。
 
 项目组合使用 [SwiftBar](https://github.com/swiftbar/SwiftBar)、[Hammerspoon](https://www.hammerspoon.org/) 与 macOS 辅助功能 API。切换过程不会移动或点击鼠标。
 
@@ -10,14 +10,14 @@
 
 ## 功能
 
-- 一键切换当前侧栏的模型与推理强度：
+- 一键切换当前主线程或侧栏的模型与推理强度：
   - Luna Max
   - Terra High
   - Sol Medium
   - Sol High
 - 打开侧栏并自动应用最近一次成功使用的侧栏预设。
 - 修改新建任务使用的 `model` 和 `model_reasoning_effort` 默认值。
-- 当前侧栏切换与 `~/.codex/config.toml` 全局配置相互隔离。
+- 当前主线程、侧栏切换与 `~/.codex/config.toml` 全局配置相互隔离。
 - 操作开始时锁定当前获得焦点的 Codex 窗口，避免切换到其他对话。
 - 支持 Mac 内置屏幕和外接显示器，无需校准屏幕坐标。
 - 设置完成后回读模型与推理强度，验证成功才记录状态。
@@ -59,6 +59,7 @@
 点击菜单栏中的 SwiftBar 项目：
 
 - **新任务默认配置**：修改 `~/.codex/config.toml`，仅影响之后新建的任务。插件替换配置前会生成 `config.toml.swiftbar-backup` 备份。
+- **当前主线程**：只切换触发操作时所在窗口的主线程，不修改全局配置，也不操作侧栏。
 - **当前侧栏**：只切换当前打开的侧栏，不修改 Codex 全局配置。
 - **打开侧栏并应用最近预设**：调用 Codex 现有的 `⌘⌥S` 命令打开侧栏，并重新应用最近一次验证成功的预设。
 
@@ -69,20 +70,20 @@
 Hammerspoon 模块会：
 
 1. 锁定触发操作时获得焦点的 Codex 窗口。
-2. 在该窗口中查找两个模型控件，并选择最右侧的侧栏输入区控件。
+2. 在该窗口中查找模型控件：最左侧属于主线程，存在第二个控件时最右侧属于侧栏。
 3. 通过辅助功能的 `AXPress` 操作选择模型。
 4. 聚焦推理强度控件，通过左右方向键调整档位。
 5. 回读辅助功能状态、关闭弹窗，并确认 `config.toml` 没有变化。
-6. 将最近一次成功预设写入 `~/.codex/codex-side-preset-state.json`。
+6. 将最近成功的主线程和侧栏预设分别写入 `~/.codex/codex-main-preset-state.json` 与 `~/.codex/codex-side-preset-state.json`。
 
 实现中不使用全局鼠标监听、鼠标移动、模拟点击或固定屏幕坐标。
 
 ## 已知限制
 
 - 当前预设面向 Codex Desktop 中显示的 GPT-5.6 Luna、Terra 和 Sol。
-- 当前实现假定：同一 Codex 对话窗口出现两个模型控件时，最右侧控件属于侧栏输入区。
+- 当前实现假定：同一 Codex 对话窗口中最左侧模型控件属于主线程；出现两个模型控件时，最右侧属于侧栏。
 - Codex Desktop 修改模型名称或辅助功能结构后，自动化可能失效。此时脚本应显示 Hammerspoon 通知并停止，不会回退操作主对话输入区。
-- 切换当前侧栏时需要让 Codex 短暂置于前台，因为推理强度滑块需要键盘焦点。
+- 切换当前主线程或侧栏时需要让 Codex 短暂置于前台，因为推理强度滑块需要键盘焦点。
 
 ## 安全说明
 
@@ -93,4 +94,3 @@ Hammerspoon 模块会：
 ## 许可证
 
 [MIT](LICENSE)
-

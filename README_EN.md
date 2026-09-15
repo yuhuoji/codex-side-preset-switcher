@@ -2,7 +2,7 @@
 
 English | [简体中文](README.md)
 
-A macOS menu-bar utility for switching model and reasoning-effort presets in the current Codex Desktop side chat.
+A macOS menu-bar utility for switching model and reasoning-effort presets in the current Codex Desktop main thread or side chat.
 
 It combines [SwiftBar](https://github.com/swiftbar/SwiftBar) with [Hammerspoon](https://www.hammerspoon.org/) and uses the macOS Accessibility API. It does not move or click the mouse.
 
@@ -10,14 +10,14 @@ It combines [SwiftBar](https://github.com/swiftbar/SwiftBar) with [Hammerspoon](
 
 ## Features
 
-- Switch the current side chat between four paired presets:
+- Switch the current main thread or side chat between four paired presets:
   - Luna Max
   - Terra High
   - Sol Medium
   - Sol High
 - Open a side chat and apply the most recently successful side-chat preset.
 - Change `model` and `model_reasoning_effort` defaults for newly created tasks.
-- Keep current-side-chat changes separate from `~/.codex/config.toml`.
+- Keep current-main-thread and side-chat changes separate from `~/.codex/config.toml`.
 - Lock automation to the Codex window that was focused when the action started.
 - Support built-in and external displays without screen-coordinate calibration.
 - Verify the selected model and reasoning level before recording success.
@@ -59,6 +59,7 @@ It combines [SwiftBar](https://github.com/swiftbar/SwiftBar) with [Hammerspoon](
 Open the SwiftBar menu:
 
 - **New-task defaults** edits `~/.codex/config.toml`. The plugin creates `config.toml.swiftbar-backup` before replacing the file.
+- **Current main thread** changes only the main composer in the window that triggered the action. It does not edit global configuration or operate the side chat.
 - **Current side chat** changes only the open side chat. It does not edit the global Codex configuration.
 - **Open side chat and apply recent preset** opens the side chat with Codex's existing `⌘⌥S` command and reapplies the last verified preset.
 
@@ -69,20 +70,20 @@ The “recently successful” label is historical state, not a live reading. Man
 The Hammerspoon module:
 
 1. Captures the currently focused Codex window.
-2. Finds two model controls and selects the rightmost one, which belongs to the side composer.
+2. Finds composer model controls: the leftmost belongs to the main thread, and the rightmost belongs to the side chat when a second control exists.
 3. Uses Accessibility `AXPress` actions to select the model.
 4. Focuses the reasoning control and uses documented left/right keyboard navigation.
 5. Reads the Accessibility state back, closes the popover, and confirms `config.toml` is unchanged.
-6. Writes the last successful side preset to `~/.codex/codex-side-preset-state.json`.
+6. Writes successful main and side presets separately to `~/.codex/codex-main-preset-state.json` and `~/.codex/codex-side-preset-state.json`.
 
 No global mouse event tap, cursor movement, or fixed screen coordinates are used.
 
 ## Limitations
 
 - This currently targets the visible Codex Desktop controls for GPT-5.6 Luna, Terra, and Sol.
-- It assumes the side composer is represented by the rightmost of two model controls in the focused Codex window.
+- It assumes the leftmost model control belongs to the main thread and the rightmost of two controls belongs to the side chat.
 - Model labels or Accessibility hierarchy changes in Codex Desktop can break automation. Failures should show a Hammerspoon notification without falling back to the main composer.
-- Current-side-chat switching briefly brings Codex to the foreground because keyboard focus is required for the reasoning slider.
+- Switching either composer briefly brings Codex to the foreground because keyboard focus is required for the reasoning slider.
 
 ## Safety
 

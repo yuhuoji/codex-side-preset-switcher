@@ -1,16 +1,18 @@
--- Codex side-chat preset switcher for Hammerspoon.
+-- Codex main-thread and side-chat preset switcher for Hammerspoon.
 -- Load from ~/.hammerspoon/init.lua with:
 -- dofile(os.getenv("HOME") .. "/.hammerspoon/codex-side-presets.lua")
 
--- Codex side-chat model presets. These intentionally do not edit config.toml.
+-- Codex composer model presets. These intentionally do not edit config.toml.
 local home = assert(os.getenv("HOME"), "HOME is not set")
 local codexBundleID = "com.openai.codex"
 local codexConfigPath = home .. "/.codex/config.toml"
+local codexMainStatePath = home .. "/.codex/codex-main-preset-state.json"
 local codexSideStatePath = home .. "/.codex/codex-side-preset-state.json"
-local codexSideBusy = false
-local codexSideActiveContext = nil
+local codexPresetBusy = false
+local codexPresetActiveContext = nil
+local codexPresetScopeLabel = "当前侧栏"
 
-local codexSidePresets = {
+local codexPresets = {
   ["luna-max"] = {
     label = "Luna Max",
     model = "GPT-5.6 Luna",
@@ -38,8 +40,8 @@ local codexSidePresets = {
 }
 
 local function codexNotify(message)
-  hs.printf("Codex side preset: %s", message)
-  hs.notify.new({title = "Codex 当前侧栏", informativeText = message}):send()
+  hs.printf("Codex preset (%s): %s", codexPresetScopeLabel, message)
+  hs.notify.new({title = "Codex " .. codexPresetScopeLabel, informativeText = message}):send()
 end
 
 local function readFile(path)
@@ -128,7 +130,7 @@ local function modelControlsInWindow(axWindow)
   return controls
 end
 
-local function findSideContext(targetWindow)
+local function findComposerContext(targetWindow, targetKind)
   local base, err = codexApplicationContext()
   if not base then return nil, err end
   if not targetWindow then return nil, "未锁定触发时的 Codex 窗口" end
@@ -139,32 +141,41 @@ local function findSideContext(targetWindow)
     local frame = elementFrame(axWindow)
     local sameTarget = frame and sameFrame(frame, targetFrame)
     local controls = sameTarget and modelControlsInWindow(axWindow) or {}
-    -- Require both composer model controls. Text markers are unsafe because a
-    -- normal transcript can itself contain the words "side chat" or "侧栏".
-    if frame and #controls >= 2 then
-      local sideModel = controls[#controls]
+    local requiredControls = targetKind == "side" and 2 or 1
+    if frame and #controls >= requiredControls then
+      -- In a window with a side chat, the main composer is leftmost and the
+      -- side composer is rightmost. With no side chat, the sole control is the
+      -- main composer. This relative ordering works across multiple displays.
+      local selectedModel = targetKind == "side" and controls[#controls] or controls[1]
       local modelPoint = {
-        x = sideModel.frame.x + sideModel.frame.w / 2,
-        y = sideModel.frame.y + sideModel.frame.h / 2,
+        x = selectedModel.frame.x + selectedModel.frame.w / 2,
+        y = selectedModel.frame.y + selectedModel.frame.h / 2,
       }
-      -- Two model controls in one conversation window are the strongest
-      -- structural signal: the rightmost one belongs to the side composer.
-      -- Do not additionally compare screen coordinates here. Electron can
-      -- report AXWindow and child coordinates in different display spaces
-      -- during a monitor transition even though their relative order is valid.
       return {
         app = base.app,
         root = base.root,
         axWindow = axWindow,
         window = targetWindow,
         frame = frame,
-        modelElement = sideModel.element,
+        modelElement = selectedModel.element,
         modelPoint = modelPoint,
+        targetKind = targetKind,
       }
     end
   end
 
-  return nil, "当前 Codex 窗口未检测到侧栏输入区"
+  if targetKind == "side" then
+    return nil, "当前 Codex 窗口未检测到侧栏输入区"
+  end
+  return nil, "当前 Codex 窗口未检测到主线程输入区"
+end
+
+local function findMainContext(targetWindow)
+  return findComposerContext(targetWindow, "main")
+end
+
+local function findSideContext(targetWindow)
+  return findComposerContext(targetWindow, "side")
 end
 
 local function waitForSideChat(callback, opened, attempt, targetWindow)
@@ -211,6 +222,45 @@ local function ensureSideChat(callback)
     end
     hs.eventtap.keyStroke({"cmd", "alt"}, "s", 0, app)
     waitForSideChat(callback, true, 1, targetWindow)
+  end)
+end
+
+local function waitForMainThread(callback, attempt, targetWindow)
+  attempt = attempt or 1
+  local context = findMainContext(targetWindow)
+  if context then
+    callback(context, false)
+    return
+  end
+  if attempt > 20 then
+    callback(nil, "等待主线程输入区出现超时")
+    return
+  end
+  hs.timer.doAfter(0.1, function()
+    waitForMainThread(callback, attempt + 1, targetWindow)
+  end)
+end
+
+local function ensureMainThread(callback)
+  local app = hs.application.get(codexBundleID)
+  if not app then
+    callback(nil, "Codex 未运行")
+    return
+  end
+  -- Lock the exact window focused before SwiftBar transfers focus. Never use
+  -- mainWindow(), because another Codex conversation may be larger or newer.
+  local targetWindow = app:focusedWindow()
+  if not targetWindow then
+    callback(nil, "无法锁定触发时的 Codex 窗口")
+    return
+  end
+  app:activate(true)
+  targetWindow:raise()
+  targetWindow:focus()
+  local hammerspoonApp = hs.application.get("org.hammerspoon.Hammerspoon")
+  if hammerspoonApp then hammerspoonApp:hide() end
+  hs.timer.doAfter(1.2, function()
+    waitForMainThread(callback, 1, targetWindow)
   end)
 end
 
@@ -358,7 +408,7 @@ local function openStrengthPopover(context, callback)
 end
 
 local function verifyPreset(context, preset)
-  -- Verify only the side composer's collapsed model button. Reading the open
+  -- Verify only the target composer's collapsed model button. Reading the open
   -- popover can produce a false positive because its slider announces the
   -- requested stop before Codex commits it.
   local text = axText(context.modelElement)
@@ -381,8 +431,8 @@ local function readEffortIndex(root)
   return type(found) == "number" and found or nil
 end
 
-local function writeSideState(presetKey, windowTitle)
-  local tempPath = codexSideStatePath .. ".tmp"
+local function writePresetState(statePath, presetKey, windowTitle)
+  local tempPath = statePath .. ".tmp"
   local payload = hs.json.encode({
     preset = presetKey,
     applied_at = os.date("!%Y-%m-%dT%H:%M:%SZ"),
@@ -393,7 +443,7 @@ local function writeSideState(presetKey, windowTitle)
   file:write(payload)
   file:write("\n")
   file:close()
-  return os.rename(tempPath, codexSideStatePath) ~= nil
+  return os.rename(tempPath, statePath) ~= nil
 end
 
 local function refreshSwiftBarCodexPlugin()
@@ -410,45 +460,67 @@ local function readSideStatePreset()
   if not contents then return nil end
   local ok, state = pcall(hs.json.decode, contents)
   if not ok or type(state) ~= "table" then return nil end
-  if type(state.preset) ~= "string" or not codexSidePresets[state.preset] then return nil end
+  if type(state.preset) ~= "string" or not codexPresets[state.preset] then return nil end
   return state.preset
 end
 
-local function dismissSidePopover(context)
+local function dismissPresetPopover(context)
   local app = context and context.app or nil
   hs.eventtap.keyStroke({}, "escape", 50000, app)
 end
 
-local function commitSidePopover(context)
+local function commitPresetPopover(context)
   -- Pressing the already-open model control toggles the popover closed without
   -- moving the pointer. Unlike Escape, this commits the selected effort.
   return context and pressAXElement(context.modelElement) or false
 end
 
 local function finishPreset(success, message)
-  codexSideBusy = false
-  local context = codexSideActiveContext
-  codexSideActiveContext = nil
-  if not success then dismissSidePopover(context) end
+  codexPresetBusy = false
+  local context = codexPresetActiveContext
+  codexPresetActiveContext = nil
+  if not success then dismissPresetPopover(context) end
   codexNotify(message)
   return success
 end
 
-local function applyPresetAttempt(presetKey, preset, configBefore, context, attempt)
+local mainScope = {
+  label = "当前主线程",
+  subject = "主线程",
+  statePath = codexMainStatePath,
+  findContext = findMainContext,
+  ensureContext = ensureMainThread,
+  waitForContext = function(callback, targetWindow)
+    waitForMainThread(callback, 1, targetWindow)
+  end,
+}
+
+local sideScope = {
+  label = "当前侧栏",
+  subject = "侧栏",
+  statePath = codexSideStatePath,
+  findContext = findSideContext,
+  ensureContext = ensureSideChat,
+  waitForContext = function(callback, targetWindow)
+    waitForSideChat(callback, false, 1, targetWindow)
+  end,
+}
+
+local function applyPresetAttempt(presetKey, preset, configBefore, context, attempt, scope)
   openStrengthPopover(context, function(chooseModelItem)
     if not chooseModelItem then
       if attempt == 1 then
         hs.eventtap.keyStroke({}, "escape", 50000, context.app)
         hs.timer.doAfter(0.25, function()
-          local refreshed = findSideContext(context.window)
+          local refreshed = scope.findContext(context.window)
           if refreshed then
-            applyPresetAttempt(presetKey, preset, configBefore, refreshed, 2)
+            applyPresetAttempt(presetKey, preset, configBefore, refreshed, 2, scope)
           else
-            finishPreset(false, "无法重新定位当前侧栏")
+            finishPreset(false, "无法重新定位当前" .. scope.subject)
           end
         end)
       else
-        finishPreset(false, "未找到侧栏的模型菜单")
+        finishPreset(false, "未找到" .. scope.subject .. "的模型菜单")
       end
       return
     end
@@ -467,7 +539,7 @@ local function applyPresetAttempt(presetKey, preset, configBefore, context, atte
       end
 
       local function configureStrength(refreshed, popoverAlreadyOpen)
-        codexSideActiveContext = refreshed
+        codexPresetActiveContext = refreshed
 
         local function configureOpenPopover()
           local effortItem = findAXMenuItem(refreshed, function(text)
@@ -475,14 +547,14 @@ local function applyPresetAttempt(presetKey, preset, configBefore, context, atte
             return text == "强度" or lower == "reasoning effort" or lower == "effort"
           end)
           if not effortItem then
-            finishPreset(false, "未找到侧栏的推理强度控件")
+            finishPreset(false, "未找到" .. scope.subject .. "的推理强度控件")
             return
           end
 
           hs.timer.doAfter(0.18, function()
             local _, effortFocusTarget = strengthPopover(refreshed)
             if not effortFocusTarget then
-              finishPreset(false, "未找到侧栏推理强度的可聚焦容器")
+              finishPreset(false, "未找到" .. scope.subject .. "推理强度的可聚焦容器")
               return
             end
 
@@ -521,11 +593,11 @@ local function applyPresetAttempt(presetKey, preset, configBefore, context, atte
               -- slider. Do not treat that transient value as a reason to send
               -- a second key sequence: doing so visibly resets to the lowest
               -- stop and applies the target again. Submit once, then verify
-              -- the collapsed side-composer control, which reflects the
+              -- the collapsed target-composer control, which reflects the
               -- committed value.
               hs.timer.doAfter(0.35, function()
-                if not commitSidePopover(refreshed) then
-                  finishPreset(false, "无法提交侧栏的推理强度选择")
+                if not commitPresetPopover(refreshed) then
+                  finishPreset(false, "无法提交" .. scope.subject .. "的推理强度选择")
                   return
                 end
                 hs.timer.doAfter(0.45, function()
@@ -533,7 +605,7 @@ local function applyPresetAttempt(presetKey, preset, configBefore, context, atte
                     finishPreset(false, "推理强度弹窗未能自动关闭")
                     return
                   end
-                  local verifiedContext = findSideContext(refreshed.window)
+                  local verifiedContext = scope.findContext(refreshed.window)
                   if not verifiedContext or not verifyPreset(verifiedContext, preset) then
                     finishPreset(false, "设置后回读不一致；未记录最近应用状态")
                     return
@@ -543,20 +615,20 @@ local function applyPresetAttempt(presetKey, preset, configBefore, context, atte
                     return
                   end
                   local windowTitle = verifiedContext.window and verifiedContext.window:title() or ""
-                  if not writeSideState(presetKey, windowTitle) then
-                    finishPreset(false, "侧栏已切换，但状态文件写入失败")
+                  if not writePresetState(scope.statePath, presetKey, windowTitle) then
+                    finishPreset(false, scope.subject .. "已切换，但状态文件写入失败")
                     return
                   end
                   refreshSwiftBarCodexPlugin()
-                  codexSideActiveContext = verifiedContext
-                  finishPreset(true, "已应用 " .. preset.label .. "；全局配置未变化")
+                  codexPresetActiveContext = verifiedContext
+                  finishPreset(true, scope.subject .. "已应用 " .. preset.label .. "；全局配置未变化")
                 end)
               end)
             end
 
             focusAXElement(effortFocusTarget, refreshed.root, function(focused)
               if not focused then
-                finishPreset(false, "无法聚焦侧栏的推理强度控件")
+                finishPreset(false, "无法聚焦" .. scope.subject .. "的推理强度控件")
                 return
               end
               adjustAndVerify()
@@ -569,7 +641,7 @@ local function applyPresetAttempt(presetKey, preset, configBefore, context, atte
         else
           openStrengthPopover(refreshed, function(opened)
             if not opened then
-              finishPreset(false, "未找到侧栏的模型与强度菜单")
+              finishPreset(false, "未找到" .. scope.subject .. "的模型与强度菜单")
               return
             end
             configureOpenPopover()
@@ -589,26 +661,27 @@ local function applyPresetAttempt(presetKey, preset, configBefore, context, atte
 
         -- Some client versions close the picker after model selection. Only
         -- those versions need the old re-locate-and-open path.
-        waitForSideChat(function(refreshed, refreshErr)
+        scope.waitForContext(function(refreshed, refreshErr)
           if not refreshed then
-            finishPreset(false, refreshErr or "选择模型后无法重新定位侧栏")
+            finishPreset(false, refreshErr or "选择模型后无法重新定位" .. scope.subject)
             return
           end
           configureStrength(refreshed, false)
-        end, false, 1, context.window)
+        end, context.window)
       end)
     end)
   end)
 end
 
-local function applyCodexSidePreset(presetKey)
-  local preset = codexSidePresets[presetKey]
+local function applyCodexComposerPreset(presetKey, scope)
+  codexPresetScopeLabel = scope.label
+  local preset = codexPresets[presetKey]
   if not preset then
     codexNotify("已拒绝未知预设：" .. tostring(presetKey))
     return
   end
-  if codexSideBusy then
-    codexNotify("已有侧栏切换正在进行")
+  if codexPresetBusy then
+    codexNotify("已有模型切换正在进行")
     return
   end
   local configBefore = readFile(codexConfigPath)
@@ -616,20 +689,20 @@ local function applyCodexSidePreset(presetKey)
     codexNotify("无法读取 config.toml，已停止操作")
     return
   end
-  codexSideBusy = true
-  ensureSideChat(function(context, status)
+  codexPresetBusy = true
+  scope.ensureContext(function(context, status)
     if not context then
       finishPreset(false, status)
       return
     end
     local function beginPreset()
-      local refreshed, refreshErr = findSideContext(context.window)
+      local refreshed, refreshErr = scope.findContext(context.window)
       if not refreshed then
-        finishPreset(false, refreshErr or "侧栏出现后无法重新定位")
+        finishPreset(false, refreshErr or scope.subject .. "出现后无法重新定位")
         return
       end
-      codexSideActiveContext = refreshed
-      applyPresetAttempt(presetKey, preset, configBefore, refreshed, 1)
+      codexPresetActiveContext = refreshed
+      applyPresetAttempt(presetKey, preset, configBefore, refreshed, 1, scope)
     end
     -- A newly opened Electron panel can enter the AX tree before its composer
     -- has finished binding keyboard events. Let that panel settle first.
@@ -641,11 +714,24 @@ local function applyCodexSidePreset(presetKey)
   end)
 end
 
+local function applyCodexMainPreset(presetKey)
+  applyCodexComposerPreset(presetKey, mainScope)
+end
+
+local function applyCodexSidePreset(presetKey)
+  applyCodexComposerPreset(presetKey, sideScope)
+end
+
+hs.urlevent.bind("codex-main-preset", function(_, params)
+  applyCodexMainPreset(params and params.preset or nil)
+end)
+
 hs.urlevent.bind("codex-side-preset", function(_, params)
   applyCodexSidePreset(params and params.preset or nil)
 end)
 
 hs.urlevent.bind("codex-side-open", function()
+  codexPresetScopeLabel = sideScope.label
   local recentPreset = readSideStatePreset()
   if recentPreset then
     applyCodexSidePreset(recentPreset)
