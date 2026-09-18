@@ -98,6 +98,18 @@ local function codexApplicationContext()
   return {app = app, root = root}
 end
 
+local function lockCodexWindow(app)
+  local focused = app and app:focusedWindow() or nil
+  if focused then return focused end
+
+  -- SwiftBar/Hammerspoon can temporarily own keyboard focus while the URL
+  -- handler starts. If Codex exposes exactly one window, it is safe to use
+  -- that visible window; with multiple windows, stop rather than guessing.
+  local windows = app and app:allWindows() or {}
+  if #windows == 1 then return windows[1] end
+  return nil
+end
+
 local function elementFrame(element)
   local position = axAttribute(element, "AXPosition")
   local size = axAttribute(element, "AXSize")
@@ -105,20 +117,36 @@ local function elementFrame(element)
   return {x = position.x, y = position.y, w = size.w, h = size.h}
 end
 
-local function sameFrame(a, b)
-  return math.abs(a.x - b.x) <= 3 and math.abs(a.y - b.y) <= 3
-    and math.abs(a.w - b.w) <= 3 and math.abs(a.h - b.h) <= 3
+local function sameFrame(a, b, tolerance)
+  tolerance = tolerance or 3
+  return math.abs(a.x - b.x) <= tolerance and math.abs(a.y - b.y) <= tolerance
+    and math.abs(a.w - b.w) <= tolerance and math.abs(a.h - b.h) <= tolerance
 end
 
-local function modelControlsInWindow(axWindow)
+local function isModelControl(element)
+  local role = axAttribute(element, "AXRole")
+  if role ~= "AXPopUpButton" and role ~= "AXMenuButton" then return false end
+  local text = axText(element):lower()
+  -- When the model/effort popover is open, Codex temporarily renames the
+  -- same model button to "选择强度" instead of exposing the GPT model name.
+  return text:find("gpt%-5%.6") ~= nil
+    or text:find("选择强度", 1, true) ~= nil
+    or text:find("choose effort", 1, true) ~= nil
+end
+
+local function modelControlsInWindow(axWindow, windowFrame)
   local controls = {}
   local seen = {}
   walkAX(axWindow, function(element)
-    if axAttribute(element, "AXRole") ~= "AXPopUpButton" then return nil end
-    local text = axText(element):lower()
-    if not text:find("gpt%-5%.6") then return nil end
+    if not isModelControl(element) then return nil end
     local frame = elementFrame(element)
     if not frame or frame.w < 60 or frame.h < 20 then return nil end
+    -- The composer is at the bottom of the window. This avoids treating an
+    -- unrelated model-like control in a transcript or future side panel as a
+    -- composer control.
+    if windowFrame and frame.y < windowFrame.y + windowFrame.h * 0.6 then
+      return nil
+    end
     local key = string.format("%.0f:%.0f:%.0f:%.0f", frame.x, frame.y, frame.w, frame.h)
     if not seen[key] then
       seen[key] = true
@@ -139,8 +167,11 @@ local function findComposerContext(targetWindow, targetKind)
 
   for _, axWindow in ipairs(axWindows) do
     local frame = elementFrame(axWindow)
-    local sameTarget = frame and sameFrame(frame, targetFrame)
-    local controls = sameTarget and modelControlsInWindow(axWindow) or {}
+    -- AX and NSScreen window frames can differ by a few pixels after a
+    -- display-scale or title-bar transition. Keep the match tight enough not
+    -- to jump to another window, but do not require byte-for-byte geometry.
+    local sameTarget = frame and sameFrame(frame, targetFrame, 12)
+    local controls = sameTarget and modelControlsInWindow(axWindow, frame) or {}
     local requiredControls = targetKind == "side" and 2 or 1
     if frame and #controls >= requiredControls then
       -- In a window with a side chat, the main composer is leftmost and the
@@ -178,6 +209,42 @@ local function findSideContext(targetWindow)
   return findComposerContext(targetWindow, "side")
 end
 
+local function pressAXElement(element)
+  if not element then return false end
+  local ok, result = pcall(function() return element:performAction("AXPress") end)
+  return ok and result ~= false
+end
+
+local function findSidebarToggle(app)
+  local root = hs.axuielement.applicationElement(app)
+  if not root then return nil end
+  return walkAX(root, function(element)
+    if axAttribute(element, "AXRole") ~= "AXMenuItem" then return nil end
+    local text = axText(element):lower()
+    if text:find("切换侧边栏", 1, true)
+        or text:find("toggle sidebar", 1, true) then
+      return element
+    end
+    return nil
+  end)
+end
+
+local function toggleCodexSidebar(app)
+  -- Prefer the actual menu item's AXPress. Codex versions have changed the
+  -- keyboard shortcut (the current build advertises ⌘B), while the menu
+  -- action remains stable. AXPress does not move or click the mouse.
+  local menuItem = findSidebarToggle(app)
+  if menuItem and pressAXElement(menuItem) then return true end
+
+  -- Conservative fallback for a build that temporarily omits menu items from
+  -- its AX tree. This is the shortcut currently advertised by Codex.
+  if app then
+    hs.eventtap.keyStroke({"cmd"}, "b", 0, app)
+    return true
+  end
+  return false
+end
+
 local function waitForSideChat(callback, opened, attempt, targetWindow)
   attempt = attempt or 1
   local context = findSideContext(targetWindow)
@@ -200,10 +267,10 @@ local function ensureSideChat(callback)
     callback(nil, "Codex 未运行")
     return
   end
-  -- Lock the exact Codex window that was last focused when SwiftBar invoked
-  -- the URL. Never substitute mainWindow(), the largest window, or another
-  -- window: users may have multiple Codex conversations open.
-  local targetWindow = app:focusedWindow()
+  -- Lock the exact focused Codex window when possible. If SwiftBar owns focus
+  -- at URL-dispatch time, lock the only Codex window instead of guessing among
+  -- multiple conversations.
+  local targetWindow = lockCodexWindow(app)
   if not targetWindow then
     callback(nil, "无法锁定触发时的 Codex 窗口")
     return
@@ -220,7 +287,10 @@ local function ensureSideChat(callback)
       callback(context, false)
       return
     end
-    hs.eventtap.keyStroke({"cmd", "alt"}, "s", 0, app)
+    if not toggleCodexSidebar(app) then
+      callback(nil, "无法打开 Codex 侧栏")
+      return
+    end
     waitForSideChat(callback, true, 1, targetWindow)
   end)
 end
@@ -247,9 +317,10 @@ local function ensureMainThread(callback)
     callback(nil, "Codex 未运行")
     return
   end
-  -- Lock the exact window focused before SwiftBar transfers focus. Never use
-  -- mainWindow(), because another Codex conversation may be larger or newer.
-  local targetWindow = app:focusedWindow()
+  -- Lock the exact focused Codex window when possible. If SwiftBar owns focus
+  -- at URL-dispatch time, lock the only Codex window instead of guessing among
+  -- multiple conversations.
+  local targetWindow = lockCodexWindow(app)
   if not targetWindow then
     callback(nil, "无法锁定触发时的 Codex 窗口")
     return
@@ -295,12 +366,6 @@ local function findAXMenuItem(context, matcher)
     return nil
   end)
   return best
-end
-
-local function pressAXElement(element)
-  if not element then return false end
-  local ok, result = pcall(function() return element:performAction("AXPress") end)
-  return ok and result ~= false
 end
 
 local function sameAXElement(left, right)
@@ -355,11 +420,23 @@ local function pollForMenuItem(context, matcher, callback, attempt)
   end)
 end
 
+local function isChooseModelText(text)
+  local lower = text:lower()
+  return lower:find("选择模型", 1, true) ~= nil
+    or lower:find("choose model", 1, true) ~= nil
+end
+
+local function isEffortText(text)
+  local lower = text:lower()
+  -- axText() includes both AXTitle and AXDescription. The current Codex item
+  -- is therefore "强度 强度", not exactly "强度".
+  return lower:find("强度", 1, true) ~= nil
+    or lower:find("reasoning effort", 1, true) ~= nil
+    or lower:find("effort", 1, true) ~= nil
+end
+
 local function strengthPopover(context)
-  local effortItem = findAXMenuItem(context, function(text)
-    local lower = text:lower()
-    return text == "强度" or lower == "reasoning effort" or lower == "effort"
-  end)
+  local effortItem = findAXMenuItem(context, isEffortText)
   if not effortItem then return nil, nil end
 
   -- Chromium exposes the actual keyboard-focus owner through
@@ -380,31 +457,33 @@ local function strengthPopover(context)
       return effortItem, current
     end
   end
-  return effortItem, nil
+  -- Some Codex builds omit AXFocusableAncestor while the popover is still
+  -- usable. The menu item itself is the safest last-resort focus target; it
+  -- keeps keyboard focus in the selected composer instead of failing over to
+  -- the other composer or to a mouse coordinate.
+  return effortItem, effortItem
 end
 
 local function openStrengthPopover(context, callback)
-  local function openNow()
-    if not pressAXElement(context.modelElement) then
-      callback(nil)
-      return
-    end
-    pollForMenuItem(context, function(text)
-      local lower = text:lower()
-      return text:find("选择模型", 1, true) or lower:find("choose model", 1, true)
-    end, callback)
+  -- If a previous invocation left the popover open, reuse it. Toggling it
+  -- closed and open again is what caused the visible stuck state and the
+  -- later second strength adjustment.
+  local existing = findAXMenuItem(context, isChooseModelText)
+  if existing then
+    callback(existing)
+    return
   end
 
-  -- Recover cleanly when a previous run left the strength popover open.
   if strengthPopover(context) then
-    if not pressAXElement(context.modelElement) then
-      callback(nil)
-      return
-    end
-    hs.timer.doAfter(0.2, openNow)
-  else
-    openNow()
+    pollForMenuItem(context, isChooseModelText, callback)
+    return
   end
+
+  if not pressAXElement(context.modelElement) then
+    callback(nil)
+    return
+  end
+  pollForMenuItem(context, isChooseModelText, callback)
 end
 
 local function verifyPreset(context, preset)
@@ -420,15 +499,86 @@ local function verifyPreset(context, preset)
   return false
 end
 
-local function readEffortIndex(root)
-  local found = walkAX(root, function(element)
-    local text = axText(element)
-    local index = text:match("第%s*(%d+)%s*项")
-      or text:lower():match("(%d+)%s*of%s*%d+")
-    if index then return tonumber(index) end
+local function effortIndexFromText(text)
+  local index = text:match("第%s*(%d+)%s*项")
+    or text:lower():match("(%d+)%s*of%s*%d+")
+  return index and tonumber(index) or nil
+end
+
+local function readEffortIndexNear(root, effortItem)
+  if not root or not effortItem then return nil end
+  local effortFrame = elementFrame(effortItem)
+  if not effortFrame then return nil end
+
+  -- Chromium exposes the current slider stop as a tiny AXStaticText next to
+  -- the slider, e.g. "GPT-5.6 Luna 最高，第 5 项，共 5 项。". It is not
+  -- necessarily a descendant of AXFocusableAncestor, so search the current
+  -- AX window and choose the announcement geometrically nearest to this
+  -- composer's effort item. This also prevents the main and side popovers
+  -- from being confused when both are present.
+  local effortCenterX = effortFrame.x + effortFrame.w / 2
+  local effortCenterY = effortFrame.y + effortFrame.h / 2
+  local candidates = {}
+  walkAX(root, function(element)
+    local index = effortIndexFromText(axText(element))
+    if not index then return nil end
+    local frame = elementFrame(element)
+    if not frame then return nil end
+    local centerX = frame.x + frame.w / 2
+    local centerY = frame.y + frame.h / 2
+    local dx = math.abs(centerX - effortCenterX)
+    local dy = math.abs(centerY - effortCenterY)
+    if dx <= 220 and dy <= 120 then
+      table.insert(candidates, {index = index, score = dx + dy * 2})
+    end
     return nil
   end)
-  return type(found) == "number" and found or nil
+
+  table.sort(candidates, function(left, right)
+    return left.score < right.score
+  end)
+  return candidates[1] and candidates[1].index or nil
+end
+
+local function composerPopoverIsOpen(context)
+  if not context then return false end
+  if strengthPopover(context) then return true end
+  local text = axText(context.modelElement):lower()
+  return text:find("选择强度", 1, true) ~= nil
+    or text:find("choose effort", 1, true) ~= nil
+end
+
+local function sendEffortKeys(keys, index, callback)
+  index = index or 1
+  if index > #keys then
+    callback()
+    return
+  end
+  -- Send one key at a time. A burst can be dropped by Electron, while a
+  -- second corrective burst visibly resets the slider and applies it twice.
+  hs.eventtap.keyStroke({}, keys[index], 0)
+  hs.timer.doAfter(0.08, function()
+    sendEffortKeys(keys, index + 1, callback)
+  end)
+end
+
+local function waitForEffortIndex(context, expected, callback, attempt)
+  attempt = attempt or 1
+  local effortItem = strengthPopover(context)
+  local current = effortItem
+      and readEffortIndexNear(context.axWindow or context.root, effortItem)
+      or nil
+  if current == expected then
+    callback(true)
+    return
+  end
+  if attempt >= 12 then
+    callback(false)
+    return
+  end
+  hs.timer.doAfter(0.08, function()
+    waitForEffortIndex(context, expected, callback, attempt + 1)
+  end)
 end
 
 local function writePresetState(statePath, presetKey, windowTitle)
@@ -466,13 +616,19 @@ end
 
 local function dismissPresetPopover(context)
   local app = context and context.app or nil
-  hs.eventtap.keyStroke({}, "escape", 50000, app)
+  if not app then return false end
+  local ok = pcall(function()
+    if not app:isFrontmost() then app:activate(true) end
+    hs.eventtap.keyStroke({}, "escape", 0, app)
+  end)
+  return ok
 end
 
 local function commitPresetPopover(context)
-  -- Pressing the already-open model control toggles the popover closed without
-  -- moving the pointer. Unlike Escape, this commits the selected effort.
-  return context and pressAXElement(context.modelElement) or false
+  -- Escape commits the selected slider stop and closes the Electron popover.
+  -- AXPress on the model button is timing-sensitive after arrow-key input and
+  -- can leave the visible popover open until the user clicks elsewhere.
+  return dismissPresetPopover(context)
 end
 
 local function finishPreset(success, message)
@@ -542,97 +698,119 @@ local function applyPresetAttempt(presetKey, preset, configBefore, context, atte
         codexPresetActiveContext = refreshed
 
         local function configureOpenPopover()
-          local effortItem = findAXMenuItem(refreshed, function(text)
-            local lower = text:lower()
-            return text == "强度" or lower == "reasoning effort" or lower == "effort"
-          end)
+          local effortItem, effortFocusTarget = strengthPopover(refreshed)
           if not effortItem then
             finishPreset(false, "未找到" .. scope.subject .. "的推理强度控件")
             return
           end
-
-          hs.timer.doAfter(0.18, function()
-            local _, effortFocusTarget = strengthPopover(refreshed)
-            if not effortFocusTarget then
-              finishPreset(false, "未找到" .. scope.subject .. "推理强度的可聚焦容器")
+          local function adjustAndVerify()
+            local focusedWindow = refreshed.app:focusedWindow()
+            if not refreshed.app:isFrontmost()
+                or not focusedWindow
+                or focusedWindow:id() ~= refreshed.window:id() then
+              finishPreset(false, "当前 Codex 窗口失去焦点，已停止强度切换")
               return
             end
 
-            local function adjustAndVerify()
-              local focusedWindow = refreshed.app:focusedWindow()
-              if not refreshed.app:isFrontmost()
-                  or not focusedWindow
-                  or focusedWindow:id() ~= refreshed.window:id() then
-                finishPreset(false, "当前 Codex 窗口失去焦点，已停止强度切换")
-                return
-              end
+            -- The current AX tree announces the selected stop as "第 n 项，
+            -- 共 5 项". Read it and send exactly the required delta. If a
+            -- future client omits that value, stop safely instead of blindly
+            -- resetting to the lowest stop and sending a second sequence.
+            local currentEffortItem = strengthPopover(refreshed)
+            local currentIndex = currentEffortItem
+                and readEffortIndexNear(
+                  refreshed.axWindow or refreshed.root,
+                  currentEffortItem
+                )
+                or nil
+            if not currentIndex then
+              finishPreset(false, "无法读取" .. scope.subject .. "的当前推理强度")
+              return
+            end
 
-              -- The Electron slider exposes no writable AXValue. It does,
-              -- however, accept the documented Left/Right keys after its AX
-              -- group is focused. Post normal foreground key events here;
-              -- application-targeted events do not reach this web control.
-              local _, currentRoot = strengthPopover(refreshed)
-              local currentIndex = currentRoot and readEffortIndex(currentRoot) or nil
-              if currentIndex then
-                local key = currentIndex < preset.effortIndex and "right" or "left"
-                for _ = 1, math.abs(preset.effortIndex - currentIndex) do
-                  hs.eventtap.keyStroke({}, key, 60000)
-                end
-              else
-                -- Conservative fallback for a future client that temporarily
-                -- omits the announced current index.
-                for _ = 1, 6 do
-                  hs.eventtap.keyStroke({}, "left", 60000)
-                end
-                for _ = 2, preset.effortIndex do
-                  hs.eventtap.keyStroke({}, "right", 60000)
-                end
-              end
+            local keys = {}
+            local key = currentIndex < preset.effortIndex and "right" or "left"
+            for _ = 1, math.abs(preset.effortIndex - currentIndex) do
+              table.insert(keys, key)
+            end
 
-              -- The popover's announced index can lag behind the visible
-              -- slider. Do not treat that transient value as a reason to send
-              -- a second key sequence: doing so visibly resets to the lowest
-              -- stop and applies the target again. Submit once, then verify
-              -- the collapsed target-composer control, which reflects the
-              -- committed value.
-              hs.timer.doAfter(0.35, function()
-                if not commitPresetPopover(refreshed) then
+            sendEffortKeys(keys, 1, function()
+              -- Wait for the AX announcement to catch up, but never send a
+              -- corrective key sequence here. That was the source of the
+              -- visible two-stage slider movement.
+              waitForEffortIndex(refreshed, preset.effortIndex, function(adjusted)
+                if not adjusted then
+                  finishPreset(false, "推理强度调整后回读不一致")
+                  return
+                end
+
+                local commitContext = scope.findContext(refreshed.window) or refreshed
+                if not commitPresetPopover(commitContext) then
                   finishPreset(false, "无法提交" .. scope.subject .. "的推理强度选择")
                   return
                 end
-                hs.timer.doAfter(0.45, function()
-                  if strengthPopover(refreshed) then
+
+                local closeRetried = false
+                local function verifyCommitted(attempt)
+                  local verifiedContext = scope.findContext(refreshed.window)
+                  if verifiedContext and not composerPopoverIsOpen(verifiedContext) then
+                    if not verifyPreset(verifiedContext, preset) then
+                      if attempt >= 20 then
+                        finishPreset(false, "设置后回读不一致；未记录最近应用状态")
+                        return
+                      end
+                      hs.timer.doAfter(0.12, function()
+                        verifyCommitted(attempt + 1)
+                      end)
+                      return
+                    end
+                    if readFile(codexConfigPath) ~= configBefore then
+                      finishPreset(false, "检测到 config.toml 发生变化；已拒绝记录状态")
+                      return
+                    end
+                    local windowTitle = verifiedContext.window
+                        and verifiedContext.window:title() or ""
+                    if not writePresetState(scope.statePath, presetKey, windowTitle) then
+                      finishPreset(false, scope.subject .. "已切换，但状态文件写入失败")
+                      return
+                    end
+                    refreshSwiftBarCodexPlugin()
+                    codexPresetActiveContext = verifiedContext
+                    finishPreset(true, scope.subject .. "已应用 " .. preset.label
+                      .. "；全局配置未变化")
+                    return
+                  end
+
+                  -- Escape normally closes the popover. If Chromium leaves it
+                  -- open while the AX tree settles, give it one controlled
+                  -- keyboard retry; this still never moves the mouse or sends
+                  -- arrows.
+                  if attempt >= 20 then
                     finishPreset(false, "推理强度弹窗未能自动关闭")
                     return
                   end
-                  local verifiedContext = scope.findContext(refreshed.window)
-                  if not verifiedContext or not verifyPreset(verifiedContext, preset) then
-                    finishPreset(false, "设置后回读不一致；未记录最近应用状态")
-                    return
+                  if attempt >= 3 and not closeRetried and verifiedContext then
+                    closeRetried = true
+                    dismissPresetPopover(verifiedContext)
                   end
-                  if readFile(codexConfigPath) ~= configBefore then
-                    finishPreset(false, "检测到 config.toml 发生变化；已拒绝记录状态")
-                    return
-                  end
-                  local windowTitle = verifiedContext.window and verifiedContext.window:title() or ""
-                  if not writePresetState(scope.statePath, presetKey, windowTitle) then
-                    finishPreset(false, scope.subject .. "已切换，但状态文件写入失败")
-                    return
-                  end
-                  refreshSwiftBarCodexPlugin()
-                  codexPresetActiveContext = verifiedContext
-                  finishPreset(true, scope.subject .. "已应用 " .. preset.label .. "；全局配置未变化")
+                  hs.timer.doAfter(0.12, function()
+                    verifyCommitted(attempt + 1)
+                  end)
+                end
+
+                hs.timer.doAfter(0.2, function()
+                  verifyCommitted(1)
                 end)
               end)
-            end
-
-            focusAXElement(effortFocusTarget, refreshed.root, function(focused)
-              if not focused then
-                finishPreset(false, "无法聚焦" .. scope.subject .. "的推理强度控件")
-                return
-              end
-              adjustAndVerify()
             end)
+          end
+
+          focusAXElement(effortFocusTarget, refreshed.root, function(focused)
+            if not focused then
+              finishPreset(false, "无法聚焦" .. scope.subject .. "的推理强度控件")
+              return
+            end
+            adjustAndVerify()
           end)
         end
 
@@ -653,9 +831,10 @@ local function applyPresetAttempt(presetKey, preset, configBefore, context, atte
         -- Selecting a model returns to the already-open model/strength
         -- popover. Reuse it immediately. Waiting for the two collapsed model
         -- controls here deadlocks until the user manually clicks elsewhere.
-        local effortItem = strengthPopover(context)
+        local refreshed = scope.findContext(context.window) or context
+        local effortItem = strengthPopover(refreshed)
         if effortItem then
-          configureStrength(context, true)
+          configureStrength(refreshed, true)
           return
         end
 

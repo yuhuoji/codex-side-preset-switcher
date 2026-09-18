@@ -61,7 +61,7 @@ Open the SwiftBar menu:
 - **New-task defaults** edits `~/.codex/config.toml`. The plugin creates `config.toml.swiftbar-backup` before replacing the file.
 - **Current main thread** changes only the main composer in the window that triggered the action. It does not edit global configuration or operate the side chat.
 - **Current side chat** changes only the open side chat. It does not edit the global Codex configuration.
-- **Open side chat and apply recent preset** opens the side chat with Codex's existing `⌘⌥S` command and reapplies the last verified preset.
+- **Open side chat and apply recent preset** opens the side chat through the Codex menu item's Accessibility action and reapplies the last verified preset; it does not depend on a fixed shortcut.
 
 The “recently successful” label is historical state, not a live reading. Manual changes made afterward are not overwritten until another preset is selected.
 
@@ -72,8 +72,8 @@ The Hammerspoon module:
 1. Captures the currently focused Codex window.
 2. Finds composer model controls: the leftmost belongs to the main thread, and the rightmost belongs to the side chat when a second control exists.
 3. Uses Accessibility `AXPress` actions to select the model.
-4. Focuses the reasoning control and uses documented left/right keyboard navigation.
-5. Reads the Accessibility state back, closes the popover, and confirms `config.toml` is unchanged.
+4. Focuses the reasoning control, reads the current stop, and sends exactly one left/right key sequence.
+5. Uses `Escape` to commit and close the popover, reads the Accessibility state back, and confirms `config.toml` is unchanged.
 6. Writes successful main and side presets separately to `~/.codex/codex-main-preset-state.json` and `~/.codex/codex-side-preset-state.json`.
 
 No global mouse event tap, cursor movement, or fixed screen coordinates are used.
