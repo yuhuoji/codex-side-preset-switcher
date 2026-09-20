@@ -8,33 +8,46 @@ local codexBundleID = "com.openai.codex"
 local codexConfigPath = home .. "/.codex/config.toml"
 local codexMainStatePath = home .. "/.codex/codex-main-preset-state.json"
 local codexSideStatePath = home .. "/.codex/codex-side-preset-state.json"
+local codexDiagnosticsDir = home .. "/.codex/codex-preset-diagnostics"
+local codexDiagnosticsPath = codexDiagnosticsDir .. "/latest.json"
 local codexPresetBusy = false
+local codexPresetRunID = 0
+local codexPresetTimeoutTimer = nil
 local codexPresetActiveContext = nil
 local codexPresetScopeLabel = "当前侧栏"
+local codexPresetStage = "idle"
 
 local codexPresets = {
   ["luna-max"] = {
     label = "Luna Max",
     model = "GPT-5.6 Luna",
+    modelKey = "5.6-luna",
     effortIndex = 5,
+    effortKey = "max",
     effortLabels = {"最高", "max"},
   },
   ["terra-high"] = {
     label = "Terra High",
     model = "GPT-5.6 Terra",
+    modelKey = "5.6-terra",
     effortIndex = 3,
+    effortKey = "high",
     effortLabels = {"高", "high"},
   },
   ["sol-medium"] = {
     label = "Sol Medium",
     model = "GPT-5.6 Sol",
+    modelKey = "5.6-sol",
     effortIndex = 2,
-    effortLabels = {"中", "medium"},
+    effortKey = "medium",
+    effortLabels = {"中", "标准", "medium", "standard"},
   },
   ["sol-high"] = {
     label = "Sol High",
     model = "GPT-5.6 Sol",
+    modelKey = "5.6-sol",
     effortIndex = 3,
+    effortKey = "high",
     effortLabels = {"高", "high"},
   },
 }
@@ -67,6 +80,34 @@ local function axText(element)
     end
   end
   return table.concat(parts, " ")
+end
+
+local function axStrings(element)
+  local values = {}
+  for _, name in ipairs({"AXIdentifier", "AXTitle", "AXDescription", "AXValue", "AXHelp"}) do
+    local value = axAttribute(element, name)
+    if type(value) == "string" and value ~= "" then
+      table.insert(values, value)
+    end
+  end
+  return values
+end
+
+local function modelKeyFromText(text)
+  local compact = tostring(text or ""):lower()
+    :gsub("gpt", "")
+    :gsub("[^%w%.]+", "")
+  if compact:find("5%.6luna") then return "5.6-luna" end
+  if compact:find("5%.6terra") then return "5.6-terra" end
+  if compact:find("5%.6sol") then return "5.6-sol" end
+  return nil
+end
+
+local function elementMatchesModel(element, modelKey)
+  for _, value in ipairs(axStrings(element)) do
+    if modelKeyFromText(value) == modelKey then return true end
+  end
+  return false
 end
 
 local function walkAX(root, visitor)
@@ -113,8 +154,19 @@ end
 local function elementFrame(element)
   local position = axAttribute(element, "AXPosition")
   local size = axAttribute(element, "AXSize")
-  if not position or not size then return nil end
-  return {x = position.x, y = position.y, w = size.w, h = size.h}
+  if position and size then
+    return {x = position.x, y = position.y, w = size.w, h = size.h}
+  end
+
+  -- Chromium's tiny live-region announcement for the combined
+  -- model/reasoning picker can expose AXFrame without exposing AXPosition and
+  -- AXSize separately. Accept the aggregate frame so the current "n of m"
+  -- stop remains readable across both accessibility representations.
+  local frame = axAttribute(element, "AXFrame")
+  if frame and frame.x and frame.y and frame.w and frame.h then
+    return {x = frame.x, y = frame.y, w = frame.w, h = frame.h}
+  end
+  return nil
 end
 
 local function sameFrame(a, b, tolerance)
@@ -123,13 +175,89 @@ local function sameFrame(a, b, tolerance)
     and math.abs(a.w - b.w) <= tolerance and math.abs(a.h - b.h) <= tolerance
 end
 
+local actionableRoles = {
+  AXMenuItem = true,
+  AXButton = true,
+  AXRadioButton = true,
+  AXCheckBox = true,
+  AXPopUpButton = true,
+  AXMenuButton = true,
+}
+
+local function relativeFrame(frame, windowFrame)
+  if not frame or not windowFrame then return nil end
+  return {
+    x = math.floor(frame.x - windowFrame.x + 0.5),
+    y = math.floor(frame.y - windowFrame.y + 0.5),
+    w = math.floor(frame.w + 0.5),
+    h = math.floor(frame.h + 0.5),
+  }
+end
+
+local function codexVersion()
+  local ok, info = pcall(hs.application.infoForBundleID, codexBundleID)
+  if not ok or type(info) ~= "table" then return "unknown" end
+  return info.CFBundleShortVersionString or info.CFBundleVersion or "unknown"
+end
+
+local function diagnosticControl(element, windowFrame)
+  if not element then return nil end
+  local role = axAttribute(element, "AXRole") or "unknown"
+  local title = axText(element)
+  -- Diagnostics are deliberately limited to picker controls. Never persist
+  -- text areas, static transcript text, or arbitrary accessibility values.
+  if not actionableRoles[role] then title = "" end
+  return {
+    role = role,
+    title = title,
+    frame = relativeFrame(elementFrame(element), windowFrame),
+  }
+end
+
+local function writeDiagnostics(stage, context, details)
+  details = details or {}
+  local payload = {
+    recorded_at = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+    codex_version = codexVersion(),
+    stage = stage,
+    scope = context and context.targetKind or details.scope or "unknown",
+    selector_type = details.selector_type or "unknown",
+    failure = details.failure,
+    main_detected = details.main_detected,
+    side_detected = details.side_detected,
+    effort_reader = details.effort_reader,
+    effort_reader_after_keys = details.effort_reader_after_keys,
+    effort_index_before = details.effort_index_before,
+    effort_index_after_keys = details.effort_index_after_keys,
+    effort_index_target = details.effort_index_target,
+    controls = {},
+  }
+  if context then
+    table.insert(payload.controls, diagnosticControl(context.modelElement, context.frame))
+    if details.chooseModelItem then
+      table.insert(payload.controls, diagnosticControl(details.chooseModelItem, context.frame))
+    end
+    if details.effortItem then
+      table.insert(payload.controls, diagnosticControl(details.effortItem, context.frame))
+    end
+  end
+  pcall(function()
+    if not hs.fs.attributes(codexDiagnosticsDir) then hs.fs.mkdir(codexDiagnosticsDir) end
+    local tempPath = codexDiagnosticsPath .. ".tmp"
+    local file = assert(io.open(tempPath, "wb"))
+    file:write(hs.json.encode(payload, true), "\n")
+    file:close()
+    assert(os.rename(tempPath, codexDiagnosticsPath))
+  end)
+end
+
 local function isModelControl(element)
   local role = axAttribute(element, "AXRole")
   if role ~= "AXPopUpButton" and role ~= "AXMenuButton" then return false end
   local text = axText(element):lower()
   -- When the model/effort popover is open, Codex temporarily renames the
   -- same model button to "选择强度" instead of exposing the GPT model name.
-  return text:find("gpt%-5%.6") ~= nil
+  return modelKeyFromText(text) ~= nil
     or text:find("选择强度", 1, true) ~= nil
     or text:find("choose effort", 1, true) ~= nil
 end
@@ -230,16 +358,18 @@ local function findSidebarToggle(app)
 end
 
 local function toggleCodexSidebar(app)
-  -- Prefer the actual menu item's AXPress. Codex versions have changed the
-  -- keyboard shortcut (the current build advertises ⌘B), while the menu
-  -- action remains stable. AXPress does not move or click the mouse.
+  -- Prefer the actual menu item's AXPress. The menu shortcut label has
+  -- changed between Codex builds, while the menu action remains stable.
+  -- AXPress does not move or click the mouse.
   local menuItem = findSidebarToggle(app)
   if menuItem and pressAXElement(menuItem) then return true end
 
   -- Conservative fallback for a build that temporarily omits menu items from
-  -- its AX tree. This is the shortcut currently advertised by Codex.
+  -- its AX tree. In the current desktop build the working Side chat command
+  -- is still Cmd-Option-S; Cmd-B may be shown by a nearby menu item but does
+  -- not open the Side chat in this window.
   if app then
-    hs.eventtap.keyStroke({"cmd"}, "b", 0, app)
+    hs.eventtap.keyStroke({"cmd", "alt"}, "s", 0, app)
     return true
   end
   return false
@@ -335,37 +465,58 @@ local function ensureMainThread(callback)
   end)
 end
 
-local function findAXMenuItem(context, matcher)
+local function pickerCandidate(context, element)
+  local role = axAttribute(element, "AXRole")
+  if not actionableRoles[role] then return nil end
+  local frame = elementFrame(element)
+  if not frame or frame.w < 12 or frame.h < 12 or not context.modelPoint then return nil end
+  if context.frame then
+    local margin = 24
+    if frame.x < context.frame.x - margin
+        or frame.y < context.frame.y - margin
+        or frame.x + frame.w > context.frame.x + context.frame.w + margin
+        or frame.y + frame.h > context.frame.y + context.frame.h + margin then
+      return nil
+    end
+  end
+  local centerX = frame.x + frame.w / 2
+  local centerY = frame.y + frame.h / 2
+  local dx = math.abs(centerX - context.modelPoint.x)
+  local dy = math.abs(centerY - context.modelPoint.y)
+  if dx > 380 or dy > 520 then return nil end
+  return frame, dx + dy * 1.35
+end
+
+local function findPickerAction(context, matcher, structuralMatcher)
   context.root = hs.axuielement.applicationElement(context.app)
   local best = nil
   local bestScore = math.huge
   walkAX(context.root, function(element)
-    if axAttribute(element, "AXRole") ~= "AXMenuItem"
-        or not matcher(axText(element), element) then
-      return nil
+    local frame, score = pickerCandidate(context, element)
+    if not frame then return nil end
+    local textMatch = matcher and matcher(axText(element), element) or false
+    local structureMatch = structuralMatcher and structuralMatcher(frame, element) or false
+    if not textMatch and not structureMatch then return nil end
+    if structureMatch and not textMatch then score = score + 500 end
+    local parent = axAttribute(element, "AXParent")
+    if axAttribute(element, "AXFocused") == true
+        or (parent and axAttribute(parent, "AXFocused") == true) then
+      score = score - 10000
     end
-    local frame = elementFrame(element)
-    if frame and context.modelPoint then
-      local centerX = frame.x + frame.w / 2
-      local centerY = frame.y + frame.h / 2
-      local score = math.abs(centerX - context.modelPoint.x)
-        + math.abs(centerY - context.modelPoint.y)
-      local parent = axAttribute(element, "AXParent")
-      if axAttribute(element, "AXFocused") == true
-          or (parent and axAttribute(parent, "AXFocused") == true) then
-        score = score - 10000
-      end
-      if axAttribute(element, "AXEnabled") == false then score = score + 20000 end
-      if score < bestScore then
-        best = element
-        bestScore = score
-      end
-    elseif not best then
+    if axAttribute(element, "AXEnabled") == false then score = score + 20000 end
+    if score < bestScore then
       best = element
+      bestScore = score
     end
     return nil
   end)
   return best
+end
+
+local function findAXMenuItem(context, matcher)
+  -- Kept as a compatibility wrapper for older callers and clients. The
+  -- implementation now accepts every actionable picker role.
+  return findPickerAction(context, matcher, nil)
 end
 
 local function sameAXElement(left, right)
@@ -376,23 +527,52 @@ local function sameAXElement(left, right)
   return leftNode ~= nil and rightNode ~= nil and leftNode == rightNode
 end
 
-local function focusAXElement(element, appRoot, callback, attempt)
+local function currentFocusedElement(app)
+  if not app then return nil end
+  local ok, root = pcall(hs.axuielement.applicationElement, app)
+  if not ok or not root then return nil end
+  return axAttribute(root, "AXFocusedUIElement")
+end
+
+local function focusAXElement(element, app, callback, attempt)
   if not element then
     callback(false)
     return
   end
   attempt = attempt or 1
-  if attempt == 1 then
-    -- setAttributeValue() often returns nil even when Chromium rejects or
-    -- ignores the request. Never treat the setter return value as proof that
-    -- keyboard focus moved.
-    pcall(function() element:setAttributeValue("AXFocused", true) end)
-  end
+  -- setAttributeValue() often returns nil even when Chromium rejects or
+  -- ignores the request. Re-assert it on every retry and verify the actual
+  -- application focus receiver below; AXFocused on the node alone can be
+  -- stale while the outer "选择强度" group remains focused.
+  pcall(function() element:setAttributeValue("AXFocused", true) end)
 
   local focused = axAttribute(element, "AXFocused") == true
-  local focusedElement = appRoot and axAttribute(appRoot, "AXFocusedUIElement") or nil
+  local focusedElement = currentFocusedElement(app)
   if focused or sameAXElement(element, focusedElement) then
-    callback(true)
+    -- Chromium updates AXFocused before it moves the actual application
+    -- focus receiver. Give that hand-off time to settle, then sample it one
+    -- more time; sending an arrow during this gap is silently dropped by the
+    -- combined picker and the receiver can briefly fall back to the model
+    -- button even after the first AXFocused read succeeded.
+    hs.timer.doAfter(0.55, function()
+      local settledElement = currentFocusedElement(app)
+      if sameAXElement(element, settledElement) then
+        hs.timer.doAfter(0.12, function()
+          local stableElement = currentFocusedElement(app)
+          if sameAXElement(element, stableElement) then
+            callback(true)
+          elseif attempt >= 8 then
+            callback(false)
+          else
+            focusAXElement(element, app, callback, attempt + 1)
+          end
+        end)
+      elseif attempt >= 8 then
+        callback(false)
+      else
+        focusAXElement(element, app, callback, attempt + 1)
+      end
+    end)
     return
   end
   if attempt >= 8 then
@@ -400,24 +580,29 @@ local function focusAXElement(element, appRoot, callback, attempt)
     return
   end
   hs.timer.doAfter(0.05, function()
-    focusAXElement(element, appRoot, callback, attempt + 1)
+    focusAXElement(element, app, callback, attempt + 1)
   end)
 end
 
-local function pollForMenuItem(context, matcher, callback, attempt)
+local function pollForPickerAction(context, matcher, structuralMatcher, callback, attempt)
   attempt = attempt or 1
-  local item = findAXMenuItem(context, matcher)
+  local item = findPickerAction(context, matcher, structuralMatcher)
   if item then
     callback(item)
     return
   end
-  if attempt > 12 then
+  if attempt >= 30 then
     callback(nil)
     return
   end
   hs.timer.doAfter(0.1, function()
-    pollForMenuItem(context, matcher, callback, attempt + 1)
+    pollForPickerAction(context, matcher, structuralMatcher, callback, attempt + 1)
   end)
+end
+
+
+local function pollForMenuItem(context, matcher, callback, attempt)
+  pollForPickerAction(context, matcher, nil, callback, attempt)
 end
 
 local function isChooseModelText(text)
@@ -435,17 +620,75 @@ local function isEffortText(text)
     or lower:find("effort", 1, true) ~= nil
 end
 
+local function chooseModelStructure(context, frame)
+  local modelFrame = elementFrame(context.modelElement)
+  if not modelFrame then return false end
+  local centerX = frame.x + frame.w / 2
+  local modelCenterX = modelFrame.x + modelFrame.w / 2
+  local verticalGap = modelFrame.y - (frame.y + frame.h)
+  return math.abs(centerX - modelCenterX) <= 170
+    and verticalGap >= 25 and verticalGap <= 150
+    and frame.h >= 20 and frame.h <= 75
+    and frame.w <= 190
+end
+
+local function effortStructure(context, frame)
+  local modelFrame = elementFrame(context.modelElement)
+  if not modelFrame then return false end
+  local centerX = frame.x + frame.w / 2
+  local modelCenterX = modelFrame.x + modelFrame.w / 2
+  local verticalGap = modelFrame.y - (frame.y + frame.h)
+  return math.abs(centerX - modelCenterX) <= 170
+    and verticalGap >= -12 and verticalGap <= 80
+    and frame.w >= math.max(150, modelFrame.w * 1.25)
+    and frame.h >= 20 and frame.h <= 70
+end
+
+local function findChooseModelAction(context)
+  return findPickerAction(context, isChooseModelText, function(frame)
+    return chooseModelStructure(context, frame)
+  end)
+end
+
+local function findEffortAction(context)
+  local modelFrame = elementFrame(context.modelElement)
+  local function isCollapsedModelButton(element)
+    local role = axAttribute(element, "AXRole")
+    if sameAXElement(element, context.modelElement) then return true end
+    local frame = elementFrame(element)
+    if modelFrame and frame and sameFrame(frame, modelFrame, 3) then return true end
+    -- A merged picker can expose the model button's effort description even
+    -- after its title has changed. A legacy standalone effort popup has no
+    -- model key and remains eligible below.
+    return (role == "AXPopUpButton" or role == "AXMenuButton")
+      and modelKeyFromText(axText(element)) ~= nil
+  end
+  return findPickerAction(context, function(text, element)
+    -- In the merged picker the collapsed model button carries an
+    -- AXDescription containing "选择强度". It is not the effort receiver;
+    -- never let its description satisfy the effort matcher.
+    if isCollapsedModelButton(element) then return false end
+    return isEffortText(text)
+  end, function(frame, element)
+    if isCollapsedModelButton(element) then return false end
+    return effortStructure(context, frame)
+  end)
+end
+
 local function strengthPopover(context)
-  local effortItem = findAXMenuItem(context, isEffortText)
+  local effortItem = findEffortAction(context)
   if not effortItem then return nil, nil end
 
-  -- Chromium exposes the actual keyboard-focus owner through
-  -- AXFocusableAncestor. It is the outer "选择强度" group, not the effort
-  -- menu item's immediate parent. Focusing the immediate parent leaves arrow
-  -- keys attached to whichever control was previously active.
-  local focusTarget = axAttribute(effortItem, "AXFocusableAncestor")
-  if focusTarget then return effortItem, focusTarget end
+  -- Current Chromium exposes the actual keyboard receiver as the "强度"
+  -- AXMenuItem with a SliderKeyboardControl DOM class. Its AXFocused
+  -- attribute is writable even while the outer "选择强度" group reports
+  -- focused=true. Focus this node directly so arrow events reach the slider.
+  local ok, settable = pcall(function()
+    return effortItem:isAttributeSettable("AXFocused")
+  end)
+  if ok and settable then return effortItem, effortItem end
 
+  -- Compatibility fallback for older Chromium accessibility trees.
   local current = effortItem
   for _ = 1, 8 do
     current = axAttribute(current, "AXParent")
@@ -453,9 +696,15 @@ local function strengthPopover(context)
     local role = axAttribute(current, "AXRole")
     local title = axAttribute(current, "AXTitle")
     if role == "AXGroup"
-        and (title == "选择强度" or title == "Choose effort") then
+        and (axAttribute(current, "AXFocused") == true
+          or title == "选择强度" or title == "Choose effort") then
       return effortItem, current
     end
+  end
+
+  local focusTarget = axAttribute(effortItem, "AXFocusableAncestor")
+  if focusTarget and not sameAXElement(focusTarget, effortItem) then
+    return effortItem, focusTarget
   end
   -- Some Codex builds omit AXFocusableAncestor while the popover is still
   -- usable. The menu item itself is the safest last-resort focus target; it
@@ -464,18 +713,30 @@ local function strengthPopover(context)
   return effortItem, effortItem
 end
 
+local function frameInsideWindow(element, windowFrame)
+  local frame = elementFrame(element)
+  if not frame or not windowFrame then return false end
+  local margin = 24
+  return frame.x >= windowFrame.x - margin
+    and frame.y >= windowFrame.y - margin
+    and frame.x + frame.w <= windowFrame.x + windowFrame.w + margin
+    and frame.y + frame.h <= windowFrame.y + windowFrame.h + margin
+end
+
 local function openStrengthPopover(context, callback)
   -- If a previous invocation left the popover open, reuse it. Toggling it
   -- closed and open again is what caused the visible stuck state and the
   -- later second strength adjustment.
-  local existing = findAXMenuItem(context, isChooseModelText)
+  local existing = findChooseModelAction(context)
   if existing then
     callback(existing)
     return
   end
 
   if strengthPopover(context) then
-    pollForMenuItem(context, isChooseModelText, callback)
+    pollForPickerAction(context, isChooseModelText, function(frame)
+      return chooseModelStructure(context, frame)
+    end, callback)
     return
   end
 
@@ -483,7 +744,103 @@ local function openStrengthPopover(context, callback)
     callback(nil)
     return
   end
-  pollForMenuItem(context, isChooseModelText, callback)
+  pollForPickerAction(context, isChooseModelText, function(frame)
+    return chooseModelStructure(context, frame)
+  end, callback)
+end
+
+local function selectorType(context)
+  local text = axText(context.modelElement)
+  if modelKeyFromText(text) then
+    for _, label in ipairs({"最高", "高", "标准", "中", "低", "max", "high", "standard", "medium", "low"}) do
+      if text:lower():find(label:lower(), 1, true) then return "combined-picker" end
+    end
+  end
+  return "legacy-separated-picker"
+end
+
+local function findModelOption(context, preset)
+  local modelFrame = elementFrame(context.modelElement)
+  local option = findPickerAction(context, function(_, element)
+    local role = axAttribute(element, "AXRole")
+    if role == "AXPopUpButton" or role == "AXMenuButton" then return false end
+    local frame = elementFrame(element)
+    if modelFrame and frame and sameFrame(modelFrame, frame, 3) then return false end
+    return elementMatchesModel(element, preset.modelKey)
+  end, nil)
+  if option then return option end
+
+  -- Some Codex builds briefly expose the model list as an application-level
+  -- portal whose AXWindow/AXFrame is not attached to the same subtree as the
+  -- composer. The normal picker candidate filter intentionally rejects that
+  -- stale ancestry. Keep the fallback geometry-only, but still pin it to the
+  -- exact composer's model button and the locked window so it cannot select a
+  -- model from the other composer or another window.
+  if not modelFrame then return nil end
+  local root = hs.axuielement.applicationElement(context.app)
+  local modelCenterX = modelFrame.x + modelFrame.w / 2
+  local modelCenterY = modelFrame.y + modelFrame.h / 2
+  local best = nil
+  local bestScore = math.huge
+  walkAX(root, function(element)
+    local role = axAttribute(element, "AXRole")
+    if role ~= "AXMenuItem" and role ~= "AXRadioButton"
+        and role ~= "AXCheckBox" and role ~= "AXButton" then
+      return nil
+    end
+    if not elementMatchesModel(element, preset.modelKey) then return nil end
+    local frame = elementFrame(element)
+    if not frame then return nil end
+    if context.frame then
+      local margin = 24
+      if frame.x < context.frame.x - margin
+          or frame.y < context.frame.y - margin
+          or frame.x + frame.w > context.frame.x + context.frame.w + margin
+          or frame.y + frame.h > context.frame.y + context.frame.h + margin then
+        return nil
+      end
+    end
+    local centerX = frame.x + frame.w / 2
+    local centerY = frame.y + frame.h / 2
+    local dx = math.abs(centerX - modelCenterX)
+    local dy = math.abs(centerY - modelCenterY)
+    if dx > 320 or dy < 18 or dy > 620 then return nil end
+    local score = dx + dy * 1.2
+    if role ~= "AXMenuItem" then score = score + 30 end
+    if score < bestScore then
+      best = element
+      bestScore = score
+    end
+    return nil
+  end)
+  return best
+end
+
+local function pollForModelOption(context, preset, callback, attempt)
+  attempt = attempt or 1
+  local option = findModelOption(context, preset)
+  if option then callback(option); return end
+  if attempt >= 30 then callback(nil); return end
+  hs.timer.doAfter(0.1, function()
+    pollForModelOption(context, preset, callback, attempt + 1)
+  end)
+end
+
+local function effortKeyFromText(text)
+  local lower = tostring(text or ""):lower()
+  -- Order matters: "最高" contains "高". Convert the combined control's
+  -- title to one semantic value before comparison instead of using substring
+  -- matching, which previously accepted Sol 最高 as Sol High.
+  if lower:find("最高", 1, true) or lower:find("max", 1, true) then return "max" end
+  if lower:find("极高", 1, true) or lower:find("very high", 1, true) then return "very-high" end
+  if lower:find("高", 1, true) or lower:find("high", 1, true) then return "high" end
+  if lower:find("标准", 1, true) or lower:find("中", 1, true)
+      or lower:find("standard", 1, true) or lower:find("medium", 1, true) then
+    return "medium"
+  end
+  if lower:find("低", 1, true) or lower:find("low", 1, true) then return "low" end
+  if lower:find("最小", 1, true) or lower:find("minimal", 1, true) then return "minimal" end
+  return nil
 end
 
 local function verifyPreset(context, preset)
@@ -491,24 +848,34 @@ local function verifyPreset(context, preset)
   -- popover can produce a false positive because its slider announces the
   -- requested stop before Codex commits it.
   local text = axText(context.modelElement)
-  local lower = text:lower()
-  if not lower:find(preset.model:lower(), 1, true) then return false end
-  for _, label in ipairs(preset.effortLabels or {}) do
-    if lower:find(label:lower(), 1, true) then return true end
-  end
-  return false
+  if modelKeyFromText(text) ~= preset.modelKey then return false end
+  return effortKeyFromText(text) == preset.effortKey
 end
 
-local function effortIndexFromText(text)
+local function effortPositionFromText(text)
   local index = text:match("第%s*(%d+)%s*项")
     or text:lower():match("(%d+)%s*of%s*%d+")
-  return index and tonumber(index) or nil
+  local total = text:match("共%s*(%d+)%s*项")
+    or text:lower():match("%d+%s*of%s*(%d+)")
+  return index and tonumber(index) or nil, total and tonumber(total) or nil
 end
 
-local function readEffortIndexNear(root, effortItem)
-  if not root or not effortItem then return nil end
+local function effortPositionFromElement(element)
+  for _, name in ipairs({"AXTitle", "AXDescription", "AXValue", "AXHelp"}) do
+    local value = axAttribute(element, name)
+    if value ~= nil then
+      local index, total = effortPositionFromText(tostring(value))
+      if index then return index, total end
+    end
+  end
+  return nil, nil
+end
+
+local function readEffortIndexNear(root, effortItem, expectedModelKey)
+  local debug = {parsed = 0, framed = 0, nearby = 0}
+  if not root or not effortItem then return nil, nil, debug end
   local effortFrame = elementFrame(effortItem)
-  if not effortFrame then return nil end
+  if not effortFrame then return nil, nil, debug end
 
   -- Chromium exposes the current slider stop as a tiny AXStaticText next to
   -- the slider, e.g. "GPT-5.6 Luna 最高，第 5 项，共 5 项。". It is not
@@ -519,25 +886,59 @@ local function readEffortIndexNear(root, effortItem)
   local effortCenterX = effortFrame.x + effortFrame.w / 2
   local effortCenterY = effortFrame.y + effortFrame.h / 2
   local candidates = {}
-  walkAX(root, function(element)
-    local index = effortIndexFromText(axText(element))
-    if not index then return nil end
-    local frame = elementFrame(element)
-    if not frame then return nil end
-    local centerX = frame.x + frame.w / 2
-    local centerY = frame.y + frame.h / 2
-    local dx = math.abs(centerX - effortCenterX)
-    local dy = math.abs(centerY - effortCenterY)
-    if dx <= 220 and dy <= 120 then
-      table.insert(candidates, {index = index, score = dx + dy * 2})
-    end
-    return nil
-  end)
+  local seen = {}
+  local function collect(searchRoot, requireModelMatch)
+    if not searchRoot or seen[searchRoot] then return end
+    seen[searchRoot] = true
+    walkAX(searchRoot, function(element)
+      local index, total = effortPositionFromElement(element)
+      if not index then return nil end
+      debug.parsed = debug.parsed + 1
+      local text = axText(element)
+      local candidateModelKey = modelKeyFromText(text)
+      if requireModelMatch and expectedModelKey and candidateModelKey
+          and candidateModelKey ~= expectedModelKey then
+        return nil
+      end
+      if requireModelMatch and expectedModelKey and not candidateModelKey then
+        return nil
+      end
+      local frame = elementFrame(element)
+      if not frame then return nil end
+      debug.framed = debug.framed + 1
+      local centerX = frame.x + frame.w / 2
+      local centerY = frame.y + frame.h / 2
+      local dx = math.abs(centerX - effortCenterX)
+      local dy = math.abs(centerY - effortCenterY)
+      if dx <= 220 and dy <= 120 then
+        debug.nearby = debug.nearby + 1
+        table.insert(candidates, {index = index, total = total, score = dx + dy * 2})
+      end
+      return nil
+    end)
+  end
+
+  -- In current Chromium builds the tiny "n of m" announcement is a sibling
+  -- of the effort item. Search its nearest ancestor popover first so a long
+  -- transcript cannot consume the global traversal budget.
+  local ancestor = effortItem
+  for _ = 1, 8 do
+    ancestor = axAttribute(ancestor, "AXParent")
+    if not ancestor then break end
+    collect(ancestor, expectedModelKey ~= nil)
+    if #candidates > 0 then break end
+  end
+  -- A window may contain both main and side pickers. The announcement is a
+  -- tiny application-level live region, so the fallback must match the
+  -- model of the composer being configured; nearest geometry alone can pick
+  -- the other composer's stale announcement after a Codex update.
+  if #candidates == 0 then collect(root, true) end
 
   table.sort(candidates, function(left, right)
     return left.score < right.score
   end)
-  return candidates[1] and candidates[1].index or nil
+  if not candidates[1] then return nil, nil, debug end
+  return candidates[1].index, candidates[1].total, debug
 end
 
 local function composerPopoverIsOpen(context)
@@ -548,36 +949,19 @@ local function composerPopoverIsOpen(context)
     or text:find("choose effort", 1, true) ~= nil
 end
 
-local function sendEffortKeys(keys, index, callback)
+local function sendEffortKeys(app, keys, index, callback)
   index = index or 1
   if index > #keys then
     callback()
     return
   end
-  -- Send one key at a time. A burst can be dropped by Electron, while a
-  -- second corrective burst visibly resets the slider and applies it twice.
-  hs.eventtap.keyStroke({}, keys[index], 0)
-  hs.timer.doAfter(0.08, function()
-    sendEffortKeys(keys, index + 1, callback)
-  end)
-end
-
-local function waitForEffortIndex(context, expected, callback, attempt)
-  attempt = attempt or 1
-  local effortItem = strengthPopover(context)
-  local current = effortItem
-      and readEffortIndexNear(context.axWindow or context.root, effortItem)
-      or nil
-  if current == expected then
-    callback(true)
-    return
-  end
-  if attempt >= 12 then
-    callback(false)
-    return
-  end
-  hs.timer.doAfter(0.08, function()
-    waitForEffortIndex(context, expected, callback, attempt + 1)
+  -- The combined picker is an Electron accessibility control. A CGEvent
+  -- posted globally can be swallowed by the popover; an app-targeted
+  -- keyStroke is delivered after the AX focus assignment and does not move
+  -- the mouse pointer.
+  hs.eventtap.keyStroke({}, keys[index], 0, app)
+  hs.timer.doAfter(0.12, function()
+    sendEffortKeys(app, keys, index + 1, callback)
   end)
 end
 
@@ -632,10 +1016,28 @@ local function commitPresetPopover(context)
 end
 
 local function finishPreset(success, message)
+  if not codexPresetBusy then
+    return
+  end
+  if codexPresetTimeoutTimer then
+    codexPresetTimeoutTimer:stop()
+    codexPresetTimeoutTimer = nil
+  end
   codexPresetBusy = false
   local context = codexPresetActiveContext
   codexPresetActiveContext = nil
   if not success then dismissPresetPopover(context) end
+  local diagnosticDetails = {
+    selector_type = context and selectorType(context) or "unknown",
+    effort_reader = context and context.effortReader or nil,
+    effort_reader_after_keys = context and context.effortReaderAfterKeys or nil,
+    effort_index_before = context and context.effortIndexBefore or nil,
+    effort_index_after_keys = context and context.effortIndexAfterKeys or nil,
+    effort_index_target = context and context.effortIndexTarget or nil,
+  }
+  if not success then diagnosticDetails.failure = message end
+  writeDiagnostics(success and "complete" or codexPresetStage, context, diagnosticDetails)
+  codexPresetStage = "idle"
   codexNotify(message)
   return success
 end
@@ -663,6 +1065,7 @@ local sideScope = {
 }
 
 local function applyPresetAttempt(presetKey, preset, configBefore, context, attempt, scope)
+  codexPresetStage = "open-picker"
   openStrengthPopover(context, function(chooseModelItem)
     if not chooseModelItem then
       if attempt == 1 then
@@ -681,14 +1084,18 @@ local function applyPresetAttempt(presetKey, preset, configBefore, context, atte
       return
     end
 
+    codexPresetStage = "open-model-list"
     pressAXElement(chooseModelItem)
-    pollForMenuItem(context, function(text)
-      return text:lower():find(preset.model:lower(), 1, true) ~= nil
-    end, function(modelItem)
+    -- Let the model portal mount before the first tree read. The polling
+    -- loop below remains bounded, but the short initial turn avoids the
+    -- update race introduced by the merged model/effort picker.
+    hs.timer.doAfter(0.18, function()
+    pollForModelOption(context, preset, function(modelItem)
       if not modelItem then
         finishPreset(false, "模型列表中未找到 " .. preset.model)
         return
       end
+      codexPresetStage = "select-model"
       if not pressAXElement(modelItem) then
         finishPreset(false, "无法选择模型 " .. preset.model)
         return
@@ -703,47 +1110,101 @@ local function applyPresetAttempt(presetKey, preset, configBefore, context, atte
             finishPreset(false, "未找到" .. scope.subject .. "的推理强度控件")
             return
           end
+
+          -- Chromium exposes the current "第 n 项，共 m 项" announcement
+          -- only while the combined picker is open but before its effort
+          -- control receives keyboard focus. Capture it now: focusing first
+          -- makes the live-region node disappear in Codex 26.915.31945.
+          local currentIndex, totalStops, effortReader = readEffortIndexNear(
+            refreshed.root or refreshed.axWindow,
+            effortItem,
+            preset.modelKey
+          )
+          refreshed.effortReader = effortReader
+          if not currentIndex then
+            finishPreset(false, "无法读取" .. scope.subject .. "的当前推理强度")
+            return
+          end
+          refreshed.effortIndexBefore = currentIndex
+          refreshed.effortIndexTarget = preset.effortIndex
+          if totalStops and preset.effortIndex > totalStops then
+            finishPreset(false, string.format(
+              "%s当前仅有 %d 档推理强度，预设需要第 %d 档",
+              scope.subject, totalStops, preset.effortIndex
+            ))
+            return
+          end
+
           local function adjustAndVerify()
-            local focusedWindow = refreshed.app:focusedWindow()
-            if not refreshed.app:isFrontmost()
-                or not focusedWindow
-                or focusedWindow:id() ~= refreshed.window:id() then
-              finishPreset(false, "当前 Codex 窗口失去焦点，已停止强度切换")
+            -- The combined picker is a transient Chromium surface. During URL
+            -- dispatch, SwiftBar or Hammerspoon can remain the macOS frontmost
+            -- app briefly even though the picker focus is valid. Validate the
+            -- picker's geometry against the exact locked Codex window instead.
+            -- Chromium mounts this popover under the application root rather
+            -- than as a descendant of AXWindow, so ancestry is not reliable.
+            if not frameInsideWindow(effortItem, refreshed.frame) then
+              finishPreset(false, "推理强度控件已离开触发时的 Codex 窗口")
               return
             end
 
             -- The current AX tree announces the selected stop as "第 n 项，
-            -- 共 5 项". Read it and send exactly the required delta. If a
+            -- 共 m 项". Read it and send exactly the required delta. If a
             -- future client omits that value, stop safely instead of blindly
             -- resetting to the lowest stop and sending a second sequence.
-            local currentEffortItem = strengthPopover(refreshed)
-            local currentIndex = currentEffortItem
-                and readEffortIndexNear(
-                  refreshed.axWindow or refreshed.root,
-                  currentEffortItem
-                )
-                or nil
-            if not currentIndex then
-              finishPreset(false, "无法读取" .. scope.subject .. "的当前推理强度")
-              return
-            end
-
+            -- Keep the exact effort item captured before focus moved. The
+            -- combined Electron picker can temporarily change its accessible
+            -- title/role after focus, which makes a second lookup race the
+            -- already-open control and return nil.
+            codexPresetStage = "adjust-effort"
             local keys = {}
             local key = currentIndex < preset.effortIndex and "right" or "left"
             for _ = 1, math.abs(preset.effortIndex - currentIndex) do
               table.insert(keys, key)
             end
 
-            sendEffortKeys(keys, 1, function()
-              -- Wait for the AX announcement to catch up, but never send a
-              -- corrective key sequence here. That was the source of the
-              -- visible two-stage slider movement.
-              waitForEffortIndex(refreshed, preset.effortIndex, function(adjusted)
-                if not adjusted then
-                  finishPreset(false, "推理强度调整后回读不一致")
+            -- URL dispatch can leave Hammerspoon frontmost even though the AX
+            -- popover is valid. Activate only the locked Codex app, then hand
+            -- focus to the exact effort node below. Calling window:focus()
+            -- after the popover is mounted can make Chromium restore focus to
+            -- the model button immediately before the arrow is posted.
+            refreshed.app:activate(true)
+            hs.timer.doAfter(0.15, function()
+              if not refreshed.app:isFrontmost() then
+                finishPreset(false, "无法将键盘焦点交还给触发时的 Codex 窗口")
+                return
+              end
+              focusAXElement(effortFocusTarget, refreshed.app, function(refocused)
+                if not refocused then
+                  finishPreset(false, "推理强度控件在按键前失去焦点")
                   return
                 end
-
+                sendEffortKeys(refreshed.app, keys, 1, function()
+              -- Capture a single diagnostic read before closing. It is not
+              -- used to send a corrective sequence: the production path must
+              -- never reset the slider and move it a second time.
+              local afterIndex, _, afterReader = readEffortIndexNear(
+                refreshed.root or refreshed.axWindow,
+                effortItem,
+                preset.modelKey
+              )
+              refreshed.effortReaderAfterKeys = afterReader
+              refreshed.effortIndexAfterKeys = afterIndex
+              local actualFocus = currentFocusedElement(refreshed.app)
+              print(string.format(
+                "Codex preset effort %s before=%s afterKeys=%s target=%s keys=%d focus=%s:%s",
+                scope.subject,
+                tostring(refreshed.effortIndexBefore),
+                tostring(afterIndex),
+                tostring(refreshed.effortIndexTarget),
+                #keys,
+                tostring(actualFocus and axAttribute(actualFocus, "AXRole") or "nil"),
+                tostring(actualFocus and axAttribute(actualFocus, "AXTitle") or "")
+              ))
+              -- Electron needs a short render/update turn after the final
+              -- arrow. Closing immediately can discard the change even
+              -- though the key reached the focused slider.
+              hs.timer.doAfter(0.55, function()
+                codexPresetStage = "commit-picker"
                 local commitContext = scope.findContext(refreshed.window) or refreshed
                 if not commitPresetPopover(commitContext) then
                   finishPreset(false, "无法提交" .. scope.subject .. "的推理强度选择")
@@ -768,6 +1229,7 @@ local function applyPresetAttempt(presetKey, preset, configBefore, context, atte
                       finishPreset(false, "检测到 config.toml 发生变化；已拒绝记录状态")
                       return
                     end
+                    codexPresetStage = "verify"
                     local windowTitle = verifiedContext.window
                         and verifiedContext.window:title() or ""
                     if not writePresetState(scope.statePath, presetKey, windowTitle) then
@@ -802,16 +1264,16 @@ local function applyPresetAttempt(presetKey, preset, configBefore, context, atte
                   verifyCommitted(1)
                 end)
               end)
+                end)
+              end)
             end)
           end
 
-          focusAXElement(effortFocusTarget, refreshed.root, function(focused)
-            if not focused then
-              finishPreset(false, "无法聚焦" .. scope.subject .. "的推理强度控件")
-              return
-            end
-            adjustAndVerify()
-          end)
+          -- adjustAndVerify() performs the single required focus hand-off
+          -- after the live-region index has been read. Focusing here as well
+          -- made the merged picker receive two consecutive focus requests
+          -- and could make the first arrow sequence look like a retry.
+          adjustAndVerify()
         end
 
         if popoverAlreadyOpen then
@@ -827,27 +1289,37 @@ local function applyPresetAttempt(presetKey, preset, configBefore, context, atte
         end
       end
 
-      hs.timer.doAfter(0.4, function()
+      hs.timer.doAfter(0.15, function()
         -- Selecting a model returns to the already-open model/strength
         -- popover. Reuse it immediately. Waiting for the two collapsed model
         -- controls here deadlocks until the user manually clicks elsewhere.
-        local refreshed = scope.findContext(context.window) or context
-        local effortItem = strengthPopover(refreshed)
-        if effortItem then
-          configureStrength(refreshed, true)
-          return
-        end
-
-        -- Some client versions close the picker after model selection. Only
-        -- those versions need the old re-locate-and-open path.
-        scope.waitForContext(function(refreshed, refreshErr)
-          if not refreshed then
-            finishPreset(false, refreshErr or "选择模型后无法重新定位" .. scope.subject)
+        local function waitForStrengthPopover(refreshed, attempt)
+          local effortItem = strengthPopover(refreshed)
+          if effortItem then
+            configureStrength(refreshed, true)
             return
           end
-          configureStrength(refreshed, false)
-        end, context.window)
+          if attempt >= 30 then
+            -- Some client versions close the picker after model selection.
+            -- Only those versions need the old re-locate-and-open path.
+            scope.waitForContext(function(nextContext, refreshErr)
+              if not nextContext then
+                finishPreset(false, refreshErr or "选择模型后无法重新定位" .. scope.subject)
+                return
+              end
+              configureStrength(nextContext, false)
+            end, context.window)
+            return
+          end
+          hs.timer.doAfter(0.1, function()
+            local nextContext = scope.findContext(context.window) or refreshed
+            waitForStrengthPopover(nextContext, attempt + 1)
+          end)
+        end
+        local refreshed = scope.findContext(context.window) or context
+        waitForStrengthPopover(refreshed, 1)
       end)
+    end)
     end)
   end)
 end
@@ -869,6 +1341,15 @@ local function applyCodexComposerPreset(presetKey, scope)
     return
   end
   codexPresetBusy = true
+  codexPresetRunID = codexPresetRunID + 1
+  local runID = codexPresetRunID
+  codexPresetStage = "locate-composer"
+  codexPresetTimeoutTimer = hs.timer.doAfter(45, function()
+    if codexPresetBusy and codexPresetRunID == runID then
+      codexPresetStage = "timeout"
+      finishPreset(false, "切换超时，已停止操作；请查看兼容性诊断")
+    end
+  end)
   scope.ensureContext(function(context, status)
     if not context then
       finishPreset(false, status)
@@ -901,6 +1382,43 @@ local function applyCodexSidePreset(presetKey)
   applyCodexComposerPreset(presetKey, sideScope)
 end
 
+local function checkCodexPickerCompatibility()
+  codexPresetScopeLabel = "控件兼容性"
+  local app = hs.application.get(codexBundleID)
+  if not app then
+    writeDiagnostics("compatibility-check", nil, {
+      scope = "window",
+      failure = "Codex 未运行",
+      main_detected = false,
+      side_detected = false,
+    })
+    codexNotify("Codex 未运行")
+    return
+  end
+  local targetWindow = lockCodexWindow(app)
+  if not targetWindow then
+    writeDiagnostics("compatibility-check", nil, {
+      scope = "window",
+      failure = "无法锁定 Codex 窗口",
+      main_detected = false,
+      side_detected = false,
+    })
+    codexNotify("无法锁定当前 Codex 窗口")
+    return
+  end
+  local mainContext = findMainContext(targetWindow)
+  local sideContext = findSideContext(targetWindow)
+  writeDiagnostics("compatibility-check", mainContext or sideContext, {
+    selector_type = mainContext and selectorType(mainContext) or "unknown",
+    main_detected = mainContext ~= nil,
+    side_detected = sideContext ~= nil,
+  })
+  local mainText = mainContext and "主线程 ✓" or "主线程无法识别"
+  local sideText = sideContext and "侧栏 ✓" or "侧栏未打开或无法识别"
+  codexNotify(mainText .. "；" .. sideText)
+  refreshSwiftBarCodexPlugin()
+end
+
 hs.urlevent.bind("codex-main-preset", function(_, params)
   applyCodexMainPreset(params and params.preset or nil)
 end)
@@ -923,4 +1441,8 @@ hs.urlevent.bind("codex-side-open", function()
     end
     codexNotify("侧栏已打开；尚无最近应用预设")
   end)
+end)
+
+hs.urlevent.bind("codex-preset-check", function()
+  checkCodexPickerCompatibility()
 end)

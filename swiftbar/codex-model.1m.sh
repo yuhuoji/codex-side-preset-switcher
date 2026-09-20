@@ -1,7 +1,7 @@
 #!/bin/zsh
 
 # <swiftbar.title>Codex Model Presets</swiftbar.title>
-# <swiftbar.version>v1.4.0</swiftbar.version>
+# <swiftbar.version>v1.5.0</swiftbar.version>
 # <swiftbar.desc>Switch new-task defaults or the current Codex main/side composer preset.</swiftbar.desc>
 # <swiftbar.refreshOnOpen>true</swiftbar.refreshOnOpen>
 
@@ -12,6 +12,7 @@ readonly CONFIG_FILE="$CODEX_CONFIG_DIR/config.toml"
 readonly BACKUP_FILE="$CODEX_CONFIG_DIR/config.toml.swiftbar-backup"
 readonly MAIN_STATE_FILE="$CODEX_CONFIG_DIR/codex-main-preset-state.json"
 readonly SIDE_STATE_FILE="$CODEX_CONFIG_DIR/codex-side-preset-state.json"
+readonly DIAGNOSTICS_FILE="$CODEX_CONFIG_DIR/codex-preset-diagnostics/latest.json"
 readonly SCRIPT_FILE="${0:A}"
 
 read_setting() {
@@ -114,6 +115,31 @@ preset_state_name() {
   fi
 }
 
+compatibility_name() {
+  local contents compact main_status side_status
+  [[ -f "$DIAGNOSTICS_FILE" && ! -L "$DIAGNOSTICS_FILE" ]] || {
+    print -r -- "尚未检查"
+    return
+  }
+  contents="$(<"$DIAGNOSTICS_FILE")"
+  compact="${contents//[[:space:]]/}"
+  if [[ "$compact" != *'"stage":"compatibility-check"'* ]]; then
+    print -r -- "等待检查"
+    return
+  fi
+  if [[ "$compact" == *'"main_detected":true'* ]]; then
+    main_status="主线程 ✓"
+  else
+    main_status="主线程无法识别"
+  fi
+  if [[ "$compact" == *'"side_detected":true'* ]]; then
+    side_status="侧栏 ✓"
+  else
+    side_status="侧栏未打开或无法识别"
+  fi
+  print -r -- "$main_status · $side_status"
+}
+
 if (( $# > 0 )); then
   case "$1" in
     global)
@@ -140,6 +166,7 @@ current_key="$current_model:$current_effort"
 current_name="$(display_name "$current_model" "$current_effort")"
 main_name="$(preset_state_name "$MAIN_STATE_FILE")"
 side_name="$(preset_state_name "$SIDE_STATE_FILE")"
+compatibility_status="$(compatibility_name)"
 
 print -r -- "Codex: $current_name"
 print -r -- "---"
@@ -163,6 +190,9 @@ print -r -- "Terra High | bash=/usr/bin/open param1=-g param2=hammerspoon://code
 print -r -- "Sol Medium | bash=/usr/bin/open param1=-g param2=hammerspoon://codex-side-preset?preset=sol-medium terminal=false refresh=true"
 print -r -- "Sol High | bash=/usr/bin/open param1=-g param2=hammerspoon://codex-side-preset?preset=sol-high terminal=false refresh=true"
 print -r -- "打开侧栏并应用最近预设 | bash=/usr/bin/open param1=-g param2=hammerspoon://codex-side-open terminal=false refresh=true"
+print -r -- "---"
+print -r -- "检查 Codex 控件兼容性 | bash=/usr/bin/open param1=-g param2=hammerspoon://codex-preset-check terminal=false refresh=true"
+print -r -- "兼容性：$compatibility_status | disabled=true size=11"
 print -r -- "---"
 print -r -- "全局配置：$current_name（仅新任务） | disabled=true size=11"
 print -r -- "Open config.toml | bash=/usr/bin/open param1=-a param2=TextEdit param3=$CONFIG_FILE terminal=false"

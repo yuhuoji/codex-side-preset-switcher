@@ -6,7 +6,7 @@ A macOS menu-bar utility for switching model and reasoning-effort presets in the
 
 It combines [SwiftBar](https://github.com/swiftbar/SwiftBar) with [Hammerspoon](https://www.hammerspoon.org/) and uses the macOS Accessibility API. It does not move or click the mouse.
 
-> This is an unofficial UI-automation project. Codex Desktop UI updates may require selector adjustments.
+> This is an unofficial UI-automation project. It auto-detects the newer combined picker and the older separated picker, and writes privacy-safe diagnostics before stopping on unknown structures.
 
 ## Features
 
@@ -21,6 +21,8 @@ It combines [SwiftBar](https://github.com/swiftbar/SwiftBar) with [Hammerspoon](
 - Lock automation to the Codex window that was focused when the action started.
 - Support built-in and external displays without screen-coordinate calibration.
 - Verify the selected model and reasoning level before recording success.
+- Detect actionable Accessibility roles such as `AXMenuItem`, `AXButton`, and `AXRadioButton` from the live tree instead of hard-coding one localized label or app version.
+- Check control compatibility from SwiftBar without changing a model.
 - Refuse unknown presets and stop safely when focus or Accessibility controls are unavailable.
 
 ## Requirements
@@ -61,7 +63,8 @@ Open the SwiftBar menu:
 - **New-task defaults** edits `~/.codex/config.toml`. The plugin creates `config.toml.swiftbar-backup` before replacing the file.
 - **Current main thread** changes only the main composer in the window that triggered the action. It does not edit global configuration or operate the side chat.
 - **Current side chat** changes only the open side chat. It does not edit the global Codex configuration.
-- **Open side chat and apply recent preset** opens the side chat through the Codex menu item's Accessibility action and reapplies the last verified preset; it does not depend on a fixed shortcut.
+- **Open side chat and apply recent preset** first uses the Codex menu item's Accessibility action; if the menu is temporarily absent from the Accessibility tree, it falls back to the working `Cmd-Option-S` shortcut in the current build, then reapplies the last verified preset. It never moves the mouse.
+- **Check Codex control compatibility** reads whether the current window's main and side composers are recognizable, without switching either one.
 
 The “recently successful” label is historical state, not a live reading. Manual changes made afterward are not overwritten until another preset is selected.
 
@@ -71,10 +74,13 @@ The Hammerspoon module:
 
 1. Captures the currently focused Codex window.
 2. Finds composer model controls: the leftmost belongs to the main thread, and the rightmost belongs to the side chat when a second control exists.
-3. Uses Accessibility `AXPress` actions to select the model.
-4. Focuses the reasoning control, reads the current stop, and sends exactly one left/right key sequence.
-5. Uses `Escape` to commit and close the popover, reads the Accessibility state back, and confirms `config.toml` is unchanged.
-6. Writes successful main and side presets separately to `~/.codex/codex-main-preset-state.json` and `~/.codex/codex-side-preset-state.json`.
+3. Selects the combined or separated picker adapter from the live Accessibility structure and scopes it by position relative to the target composer.
+4. Normalizes model names for exact matching and uses Accessibility `AXPress`; unavailable models never fall back to a similar entry.
+5. Reads the current and total reasoning stops and sends exactly one delta-only left/right key sequence, with no reset or corrective second pass.
+6. Uses `Escape` to commit and close the popover, reads the Accessibility state back, and confirms `config.toml` is unchanged.
+7. Writes successful main and side presets separately to `~/.codex/codex-main-preset-state.json` and `~/.codex/codex-side-preset-state.json`.
+
+The latest compatibility check or failure stage is written to `~/.codex/codex-preset-diagnostics/latest.json`. It contains only the Codex version, picker roles, selector type, relative geometry, and failure stage—not conversation or composer text.
 
 No global mouse event tap, cursor movement, or fixed screen coordinates are used.
 
