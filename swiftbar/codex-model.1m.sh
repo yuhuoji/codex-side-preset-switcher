@@ -278,10 +278,10 @@ else
   side_name="$(preset_state_name "$SIDE_STATE_FILE")"
   compatibility_status="$(compatibility_name)"
 
-  print -r -- "新任务默认配置 | disabled=true"
+  print -r -- "新任务默认配置（当前主线程同步目标） | disabled=true"
   emit_preset_groups global
   print -r -- "---"
-  print -r -- "当前主线程 | disabled=true"
+  print -r -- "当前主线程（切换后同步新任务） | disabled=true"
   print -r -- "最近成功：$main_name | disabled=true size=11"
   emit_preset_groups main
   print -r -- "---"
@@ -297,5 +297,5 @@ fi
 print -r -- "---"
 print -r -- "打开/编辑预设配置（让 AI 修改此文件） | bash=/usr/bin/open param1=-a param2=TextEdit param3=$PRESETS_FILE terminal=false"
 print -r -- "重新加载预设配置 | bash=$HAMMERSPOON_DISPATCH_FILE param1=reload terminal=false refresh=true"
-print -r -- "全局配置：$current_name（仅新任务） | disabled=true size=11"
+print -r -- "共享默认：$current_name（主线程与新任务） | disabled=true size=11"
 print -r -- "Open config.toml | bash=/usr/bin/open param1=-a param2=TextEdit param3=$CONFIG_FILE terminal=false"

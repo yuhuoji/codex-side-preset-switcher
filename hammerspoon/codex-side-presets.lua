@@ -2,10 +2,12 @@
 -- Load from ~/.hammerspoon/init.lua with:
 -- dofile(os.getenv("HOME") .. "/.hammerspoon/codex-side-presets.lua")
 
--- Codex composer model presets. These intentionally do not edit config.toml.
+-- Codex composer model presets. Main-thread changes also sync config.toml so
+-- newly created threads use the same model and reasoning effort.
 local home = assert(os.getenv("HOME"), "HOME is not set")
 local codexBundleID = "com.openai.codex"
 local codexConfigPath = home .. "/.codex/config.toml"
+local codexConfigBackupPath = home .. "/.codex/config.toml.swiftbar-backup"
 local codexPresetConfigPath = home .. "/.codex/codex-presets.json"
 local codexMainStatePath = home .. "/.codex/codex-main-preset-state.json"
 local codexSideStatePath = home .. "/.codex/codex-side-preset-state.json"
@@ -35,6 +37,96 @@ local function readFile(path)
   local contents = file:read("*a")
   file:close()
   return contents
+end
+
+local function shellQuote(value)
+  return "'" .. tostring(value):gsub("'", "'\\''") .. "'"
+end
+
+local function writeAtomicFile(path, contents)
+  local tempPath = path .. ".codex-preset-tmp"
+  os.remove(tempPath)
+  local file, openError = io.open(tempPath, "wb")
+  if not file then return false, tostring(openError or "无法创建临时文件") end
+  local ok, writeError = pcall(function()
+    file:write(contents)
+    file:flush()
+    file:close()
+  end)
+  if not ok then
+    pcall(function() file:close() end)
+    os.remove(tempPath)
+    return false, tostring(writeError)
+  end
+  local chmodStatus = os.execute("/bin/chmod 600 " .. shellQuote(tempPath))
+  if chmodStatus ~= true and chmodStatus ~= 0 then
+    os.remove(tempPath)
+    return false, "无法设置临时文件权限"
+  end
+  if not os.rename(tempPath, path) then
+    os.remove(tempPath)
+    return false, "无法原子替换 " .. path
+  end
+  return true, nil
+end
+
+local function updateTopLevelConfig(contents, model, effort)
+  local newline = contents:find("\r\n", 1, true) and "\r\n" or "\n"
+  local normalized = contents:gsub("\r\n", "\n")
+  local lines = {}
+  local inTopLevel = true
+  local modelCount = 0
+  local effortCount = 0
+  local modelValue = '"' .. tostring(model):gsub("\\", "\\\\"):gsub('"', '\\"') .. '"'
+  local effortValue = '"' .. tostring(effort):gsub("\\", "\\\\"):gsub('"', '\\"') .. '"'
+
+  for line in (normalized .. "\n"):gmatch("(.-)\n") do
+    if line:match("^%s*%[[^%]]+%]%s*$") then
+      inTopLevel = false
+    elseif inTopLevel then
+      local prefix, suffix = line:match("^(%s*model%s*=%s*)\"[^\"]*\"(.*)$")
+      if prefix then
+        line = prefix .. modelValue .. suffix
+        modelCount = modelCount + 1
+      else
+        prefix, suffix = line:match("^(%s*model_reasoning_effort%s*=%s*)\"[^\"]*\"(.*)$")
+        if prefix then
+          line = prefix .. effortValue .. suffix
+          effortCount = effortCount + 1
+        end
+      end
+    end
+    table.insert(lines, line)
+  end
+
+  if modelCount ~= 1 or effortCount ~= 1 then
+    return nil, string.format(
+      "config.toml 顶层字段数量异常（model=%d，model_reasoning_effort=%d）",
+      modelCount, effortCount
+    )
+  end
+  return table.concat(lines, newline), nil
+end
+
+local function syncMainPresetToConfig(preset, configBefore)
+  local attributes = hs.fs.attributes(codexConfigPath)
+  if not attributes or attributes.mode ~= "file" then
+    return false, "config.toml 不存在或不是普通文件"
+  end
+  local updatedConfig, updateError = updateTopLevelConfig(
+    configBefore, preset.model, preset.effortKey
+  )
+  if not updatedConfig then return false, updateError end
+
+  local backupOK, backupError = writeAtomicFile(codexConfigBackupPath, configBefore)
+  if not backupOK then return false, "无法写入 config.toml 备份：" .. backupError end
+  local configOK, configError = writeAtomicFile(codexConfigPath, updatedConfig)
+  if not configOK then return false, "无法写入 config.toml：" .. configError end
+  if readFile(codexConfigPath) ~= updatedConfig then
+    writeAtomicFile(codexConfigPath, configBefore)
+    return false, "config.toml 回读不一致，已尝试恢复原内容"
+  end
+  return true, nil
 end
 
 -- Keep a first-run fallback so the module can still be loaded before the
@@ -88,54 +180,6 @@ local defaultPresetDefinitions = {
     aliases = {},
     enabled = true,
     legacy = false,
-  },
-  {
-    id = "luna-max",
-    label = "GPT-5.6 Luna Max",
-    group = "GPT-5.6 兼容",
-    model = "gpt-5.6-luna",
-    model_label = "GPT-5.6 Luna",
-    effort = "max",
-    effort_index = 5,
-    aliases = {},
-    enabled = true,
-    legacy = true,
-  },
-  {
-    id = "terra-high",
-    label = "GPT-5.6 Terra High",
-    group = "GPT-5.6 兼容",
-    model = "gpt-5.6-terra",
-    model_label = "GPT-5.6 Terra",
-    effort = "high",
-    effort_index = 3,
-    aliases = {},
-    enabled = true,
-    legacy = true,
-  },
-  {
-    id = "sol-medium",
-    label = "GPT-5.6 Sol Medium",
-    group = "GPT-5.6 兼容",
-    model = "gpt-5.6-sol",
-    model_label = "GPT-5.6 Sol",
-    effort = "medium",
-    effort_index = 2,
-    aliases = {},
-    enabled = true,
-    legacy = true,
-  },
-  {
-    id = "sol-high",
-    label = "GPT-5.6 Sol High",
-    group = "GPT-5.6 兼容",
-    model = "gpt-5.6-sol",
-    model_label = "GPT-5.6 Sol",
-    effort = "high",
-    effort_index = 3,
-    aliases = {},
-    enabled = true,
-    legacy = true,
   },
 }
 
@@ -1146,7 +1190,7 @@ local function readEffortIndexNear(root, effortItem, expectedModelKey)
   if not effortFrame then return nil, nil, debug end
 
   -- Chromium exposes the current slider stop as a tiny AXStaticText next to
-  -- the slider, e.g. "GPT-5.6 Luna 最高，第 5 项，共 5 项。". It is not
+  -- the slider, e.g. "GPT-6 Luna 最高，第 5 项，共 5 项。". It is not
   -- necessarily a descendant of AXFocusableAncestor, so search the current
   -- AX window and choose the announcement geometrically nearest to this
   -- composer's effort item. This also prevents the main and side popovers
@@ -1353,6 +1397,7 @@ local mainScope = {
   label = "当前主线程",
   subject = "主线程",
   statePath = codexMainStatePath,
+  syncsGlobal = true,
   findContext = findMainContext,
   ensureContext = ensureMainThread,
   waitForContext = function(callback, targetWindow)
@@ -1364,6 +1409,7 @@ local sideScope = {
   label = "当前侧栏",
   subject = "侧栏",
   statePath = codexSideStatePath,
+  syncsGlobal = false,
   findContext = findSideContext,
   ensureContext = ensureSideChat,
   waitForContext = function(callback, targetWindow)
@@ -1541,9 +1587,24 @@ local function applyPresetAttempt(presetKey, preset, configBefore, context, atte
                       end)
                       return
                     end
-                    if readFile(codexConfigPath) ~= configBefore then
-                      finishPreset(false, "检测到 config.toml 发生变化；已拒绝记录状态")
-                      return
+                    local configMessage
+                    if scope.syncsGlobal then
+                      if readFile(codexConfigPath) ~= configBefore then
+                        finishPreset(false, "检测到 config.toml 被其他程序修改；已拒绝同步新任务配置")
+                        return
+                      end
+                      local synced, syncError = syncMainPresetToConfig(preset, configBefore)
+                      if not synced then
+                        finishPreset(false, "主线程已切换，但新任务配置同步失败：" .. tostring(syncError))
+                        return
+                      end
+                      configMessage = "；新任务默认已同步"
+                    else
+                      if readFile(codexConfigPath) ~= configBefore then
+                        finishPreset(false, "检测到 config.toml 发生变化；已拒绝记录状态")
+                        return
+                      end
+                      configMessage = "；全局配置未变化"
                     end
                     codexPresetStage = "verify"
                     local windowTitle = verifiedContext.window
@@ -1554,8 +1615,7 @@ local function applyPresetAttempt(presetKey, preset, configBefore, context, atte
                     end
                     refreshSwiftBarCodexPlugin()
                     codexPresetActiveContext = verifiedContext
-                    finishPreset(true, scope.subject .. "已应用 " .. preset.label
-                      .. "；全局配置未变化")
+                    finishPreset(true, scope.subject .. "已应用 " .. preset.label .. configMessage)
                     return
                   end
 

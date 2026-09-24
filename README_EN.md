@@ -10,17 +10,12 @@ It combines [SwiftBar](https://github.com/swiftbar/SwiftBar), [Hammerspoon](http
 
 ## Presets
 
-The default configuration puts GPT-6 in the primary menu and keeps GPT-5.6 as a compatibility group:
+The default configuration keeps GPT-6 only:
 
 - GPT-6 Astra Max
 - GPT-6 Sol High
 - GPT-6 Sol Medium
 - GPT-6 Luna Max
-- GPT-5.6 Luna Max
-- GPT-5.6 Terra High
-- GPT-5.6 Sol Medium
-- GPT-5.6 Sol High
-
 Actual availability still depends on the current Codex account and client rollout. If the exact target model is not exposed by the current UI, the switcher stops rather than selecting a similar model. The model and reasoning controls are beneath the Codex Desktop composer; see the [OpenAI Models documentation](https://learn.chatgpt.com/docs/models?translationFallback=ja-JP).
 
 ## AI-editable JSON configuration
@@ -57,7 +52,7 @@ The schema is:
 }
 ```
 
-`id` is the stable menu and URL identifier. Existing IDs `luna-max`, `terra-high`, `sol-medium`, and `sol-high` are retained for old state files and links. `label` is the menu text; `group` controls the menu section; `model` is the API ID; `model_label` is the exact Desktop label; `effort` must be `low`, `medium`, `high`, `xhigh`, `max`, or `ultra`; `effort_index` is the 1-based slider stop; `aliases` are exact display aliases; `enabled=false` hides a preset; and `legacy` marks a compatibility entry.
+`id` is the stable menu and URL identifier. `label` is the menu text; `group` controls the menu section; `model` is the API ID; `model_label` is the exact Desktop label; `effort` must be `low`, `medium`, `high`, `xhigh`, `max`, or `ultra`; `effort_index` is the 1-based slider stop; `aliases` are exact display aliases; `enabled=false` hides a preset; and `legacy=false` is retained as a compatibility field for GPT-6 entries.
 
 After editing:
 
@@ -70,10 +65,10 @@ SwiftBar also provides **Open/edit preset configuration (for AI)**. It opens `~/
 ## Features
 
 - Switch the current main thread or side chat with one paired model/effort action.
-- Generate GPT-6 and GPT-5.6 compatibility groups dynamically from one JSON file.
+- Generate GPT-6 presets dynamically from one JSON file.
 - Open the side chat and apply the most recently successful side-chat preset.
-- Change `model` and `model_reasoning_effort` in `~/.codex/config.toml` for new tasks only when the user explicitly chooses the New-task defaults menu.
-- Keep current main-thread and side-chat changes separate from `config.toml`, and verify that the file is unchanged before recording success.
+- Use the same preset configuration for the current main thread and new-task defaults. After a main-thread switch is verified, the tool writes the same model and reasoning effort to `~/.codex/config.toml` for future threads.
+- Keep side-chat changes separate from `config.toml`, and verify that the file is unchanged before recording success.
 - Lock automation to the Codex window focused when the action starts, including built-in and external displays.
 - Read back the selected model and reasoning effort before writing recent-state files.
 - Support the current combined picker and older separated picker.
@@ -126,8 +121,8 @@ remain available for backwards compatibility.
 
 Open the SwiftBar menu:
 
-- **New-task defaults** edits global `config.toml` and creates `config.toml.swiftbar-backup` before replacement.
-- **Current main thread** changes only the main composer in the triggering window.
+- **New-task defaults** edits the shared `config.toml` and creates `config.toml.swiftbar-backup` before replacement.
+- **Current main thread** changes the main composer in the triggering window, then synchronizes the verified model and effort to the shared config for future threads.
 - **Current side chat** changes only the right-hand side composer in the triggering window.
 - **Open side chat and apply recent preset** opens the side chat when needed, then applies the most recently verified side preset.
 - **Check Codex control compatibility** reads the current main and side controls without changing a model.
@@ -139,7 +134,7 @@ Open the SwiftBar menu:
 
 Hammerspoon locks the triggering Codex window, finds the target composer in the Accessibility tree, and distinguishes main versus side by their relative positions. Model matching is exact across `model`, `model_label`, and `aliases`. The current effort stop is read first, then only the required left/right delta is sent; the slider is never reset or corrected in a second pass.
 
-Main-thread and side-chat actions do not write `config.toml`. The implementation has no mouse movement, global mouse listener, fixed screen coordinates, or simulated mouse clicks. When a Codex update makes the controls unrecognizable, it stops, notifies the user, and writes a diagnostic file.
+The main-thread action writes `config.toml` only after the model and effort read back successfully, with a backup; side-chat actions do not write it. The implementation has no mouse movement, global mouse listener, fixed screen coordinates, or simulated mouse clicks. When a Codex update makes the controls unrecognizable, it stops, notifies the user, and writes a diagnostic file.
 
 ## License
 
