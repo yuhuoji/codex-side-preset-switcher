@@ -87,6 +87,7 @@ SwiftBar also provides **Open/edit preset configuration (for AI)**. It opens `~/
 - [Hammerspoon](https://www.hammerspoon.org/)
 - [SwiftBar](https://github.com/swiftbar/SwiftBar)
 - `/usr/bin/jq`
+- Hammerspoon CLI, usually `/opt/homebrew/bin/hs` (or `/usr/local/bin/hs` on Intel Homebrew)
 - Accessibility permission for Hammerspoon under **System Settings → Privacy & Security → Accessibility**
 
 ## Installation
@@ -96,12 +97,15 @@ From the repository directory:
 ```sh
 cp hammerspoon/codex-side-presets.lua ~/.hammerspoon/
 cp swiftbar/codex-model.1m.sh /path/to/your/swiftbar/plugins/
-chmod +x /path/to/your/swiftbar/plugins/codex-model.1m.sh
+cp swiftbar/codex-hammerspoon-dispatch.sh /path/to/your/swiftbar/plugins/
+chmod +x /path/to/your/swiftbar/plugins/codex-model.1m.sh \
+  /path/to/your/swiftbar/plugins/codex-hammerspoon-dispatch.sh
 ```
 
 Add this line to `~/.hammerspoon/init.lua`:
 
 ```lua
+require("hs.ipc")
 dofile(os.getenv("HOME") .. "/.hammerspoon/codex-side-presets.lua")
 ```
 
@@ -112,6 +116,11 @@ ln -s /absolute/path/to/codex-side-preset-switcher/codex-presets.json ~/.codex/c
 ```
 
 If a live file already exists, keep it instead of overwriting it; a regular JSON file is supported too. Click **Reload config** in Hammerspoon and refresh SwiftBar afterward.
+
+SwiftBar actions use Hammerspoon CLI IPC instead of depending on the system's
+`hammerspoon://` LaunchServices registration. If `hs` is elsewhere, set
+`CODEX_HAMMERSPOON_CLI` before launching SwiftBar. The original URL handlers
+remain available for backwards compatibility.
 
 ## Usage
 

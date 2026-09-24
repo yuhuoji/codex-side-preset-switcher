@@ -98,6 +98,7 @@ GPT-6 的具体可用性仍由当前 Codex 账户和客户端灰度决定；如�
 - [Hammerspoon](https://www.hammerspoon.org/)
 - [SwiftBar](https://github.com/swiftbar/SwiftBar)
 - `/usr/bin/jq`
+- Hammerspoon CLI：通常为 `/opt/homebrew/bin/hs`（Intel Homebrew 通常为 `/usr/local/bin/hs`）
 - 在“系统设置 → 隐私与安全性 → 辅助功能”中允许 Hammerspoon 控制电脑
 
 ## 安装
@@ -107,12 +108,15 @@ GPT-6 的具体可用性仍由当前 Codex 账户和客户端灰度决定；如�
 ```sh
 cp hammerspoon/codex-side-presets.lua ~/.hammerspoon/
 cp swiftbar/codex-model.1m.sh /你的/SwiftBar/插件目录/
-chmod +x /你的/SwiftBar/插件目录/codex-model.1m.sh
+cp swiftbar/codex-hammerspoon-dispatch.sh /你的/SwiftBar/插件目录/
+chmod +x /你的/SwiftBar/插件目录/codex-model.1m.sh \
+  /你的/SwiftBar/插件目录/codex-hammerspoon-dispatch.sh
 ```
 
 在 `~/.hammerspoon/init.lua` 中加入：
 
 ```lua
+require("hs.ipc")
 dofile(os.getenv("HOME") .. "/.hammerspoon/codex-side-presets.lua")
 ```
 
@@ -123,6 +127,11 @@ ln -s /你的仓库绝对路径/codex-presets.json ~/.codex/codex-presets.json
 ```
 
 如果该文件已经存在，请先保留现有配置，不要直接覆盖；运行端也支持普通 JSON 文件。完成后在 Hammerspoon 点击 **Reload config**，再刷新 SwiftBar。
+
+SwiftBar 菜单动作通过 Hammerspoon CLI 的 IPC 通道发送，不依赖系统是否登记
+`hammerspoon://` URL，因此 Hammerspoon 更新或 LaunchServices 重建后仍更稳定。
+如果 `hs` 不在两个默认路径，可在运行 SwiftBar 前设置
+`CODEX_HAMMERSPOON_CLI` 指向实际路径。原有 URL 接口仍保留，供旧调用兼容。
 
 ## 使用方法
 

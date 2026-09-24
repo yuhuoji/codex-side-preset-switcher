@@ -1743,15 +1743,7 @@ local function checkCodexPickerCompatibility()
   refreshSwiftBarCodexPlugin()
 end
 
-hs.urlevent.bind("codex-main-preset", function(_, params)
-  applyCodexMainPreset(params and params.preset or nil)
-end)
-
-hs.urlevent.bind("codex-side-preset", function(_, params)
-  applyCodexSidePreset(params and params.preset or nil)
-end)
-
-hs.urlevent.bind("codex-side-open", function()
+local function openCodexSideWithRecentPreset()
   codexPresetScopeLabel = sideScope.label
   local configOK, configError = loadCodexPresetConfig()
   if not configOK then
@@ -1768,18 +1760,53 @@ hs.urlevent.bind("codex-side-open", function()
       codexNotify(err)
       return
     end
-    codexNotify("侧栏已打开；尚无最近应用预设")
+      codexNotify("侧栏已打开；尚无最近应用预设")
   end)
+end
+
+-- SwiftBar normally reaches this module through the URL handlers below. The
+-- Hammerspoon CLI also calls this exported dispatcher, which keeps menu
+-- actions working even when LaunchServices has lost the hammerspoon scheme.
+local function dispatchCodexPresetEvent(eventName, presetKey)
+  if eventName == "codex-main-preset" then
+    applyCodexMainPreset(presetKey)
+  elseif eventName == "codex-side-preset" then
+    applyCodexSidePreset(presetKey)
+  elseif eventName == "codex-side-open" then
+    openCodexSideWithRecentPreset()
+  elseif eventName == "codex-preset-check" then
+    checkCodexPickerCompatibility()
+  elseif eventName == "codex-preset-reload" then
+    reloadPresetConfig()
+  elseif eventName == "codex-preset-open-config" then
+    openPresetConfig()
+  else
+    codexNotify("未知的预设操作：" .. tostring(eventName))
+  end
+end
+
+_G.codexPresetDispatch = dispatchCodexPresetEvent
+
+hs.urlevent.bind("codex-main-preset", function(_, params)
+  dispatchCodexPresetEvent("codex-main-preset", params and params.preset or nil)
+end)
+
+hs.urlevent.bind("codex-side-preset", function(_, params)
+  dispatchCodexPresetEvent("codex-side-preset", params and params.preset or nil)
+end)
+
+hs.urlevent.bind("codex-side-open", function()
+  dispatchCodexPresetEvent("codex-side-open")
 end)
 
 hs.urlevent.bind("codex-preset-check", function()
-  checkCodexPickerCompatibility()
+  dispatchCodexPresetEvent("codex-preset-check")
 end)
 
 hs.urlevent.bind("codex-preset-reload", function()
-  reloadPresetConfig()
+  dispatchCodexPresetEvent("codex-preset-reload")
 end)
 
 hs.urlevent.bind("codex-preset-open-config", function()
-  openPresetConfig()
+  dispatchCodexPresetEvent("codex-preset-open-config")
 end)

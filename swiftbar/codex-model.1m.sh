@@ -15,6 +15,7 @@ readonly MAIN_STATE_FILE="$CODEX_CONFIG_DIR/codex-main-preset-state.json"
 readonly SIDE_STATE_FILE="$CODEX_CONFIG_DIR/codex-side-preset-state.json"
 readonly DIAGNOSTICS_FILE="$CODEX_CONFIG_DIR/codex-preset-diagnostics/latest.json"
 readonly SCRIPT_FILE="${0:A}"
+readonly HAMMERSPOON_DISPATCH_FILE="${SCRIPT_FILE:h}/codex-hammerspoon-dispatch.sh"
 readonly JQ="/usr/bin/jq"
 
 typeset -a PRESET_IDS PRESET_GROUPS
@@ -228,10 +229,10 @@ emit_preset_groups() {
           print -r -- "$label | bash=$SCRIPT_FILE param1=global param2=$id terminal=false refresh=true checked=$(checked_if "$current_key" "${PRESET_KEY[$id]}")"
           ;;
         main)
-          print -r -- "$label | bash=/usr/bin/open param1=-g param2=hammerspoon://codex-main-preset?preset=$id terminal=false refresh=true"
+          print -r -- "$label | bash=$HAMMERSPOON_DISPATCH_FILE param1=main param2=$id terminal=false refresh=true"
           ;;
         side)
-          print -r -- "$label | bash=/usr/bin/open param1=-g param2=hammerspoon://codex-side-preset?preset=$id terminal=false refresh=true"
+          print -r -- "$label | bash=$HAMMERSPOON_DISPATCH_FILE param1=side param2=$id terminal=false refresh=true"
           ;;
       esac
     done
@@ -287,14 +288,14 @@ else
   print -r -- "当前侧栏 | disabled=true"
   print -r -- "最近成功：$side_name | disabled=true size=11"
   emit_preset_groups side
-  print -r -- "打开侧栏并应用最近预设 | bash=/usr/bin/open param1=-g param2=hammerspoon://codex-side-open terminal=false refresh=true"
+  print -r -- "打开侧栏并应用最近预设 | bash=$HAMMERSPOON_DISPATCH_FILE param1=side-open terminal=false refresh=true"
   print -r -- "---"
-  print -r -- "检查 Codex 控件兼容性 | bash=/usr/bin/open param1=-g param2=hammerspoon://codex-preset-check terminal=false refresh=true"
+  print -r -- "检查 Codex 控件兼容性 | bash=$HAMMERSPOON_DISPATCH_FILE param1=check terminal=false refresh=true"
   print -r -- "兼容性：$compatibility_status | disabled=true size=11"
 fi
 
 print -r -- "---"
 print -r -- "打开/编辑预设配置（让 AI 修改此文件） | bash=/usr/bin/open param1=-a param2=TextEdit param3=$PRESETS_FILE terminal=false"
-print -r -- "重新加载预设配置 | bash=/usr/bin/open param1=-g param2=hammerspoon://codex-preset-reload terminal=false refresh=true"
+print -r -- "重新加载预设配置 | bash=$HAMMERSPOON_DISPATCH_FILE param1=reload terminal=false refresh=true"
 print -r -- "全局配置：$current_name（仅新任务） | disabled=true size=11"
 print -r -- "Open config.toml | bash=/usr/bin/open param1=-a param2=TextEdit param3=$CONFIG_FILE terminal=false"
