@@ -6,6 +6,7 @@
 local home = assert(os.getenv("HOME"), "HOME is not set")
 local codexBundleID = "com.openai.codex"
 local codexConfigPath = home .. "/.codex/config.toml"
+local codexPresetConfigPath = home .. "/.codex/codex-presets.json"
 local codexMainStatePath = home .. "/.codex/codex-main-preset-state.json"
 local codexSideStatePath = home .. "/.codex/codex-side-preset-state.json"
 local codexDiagnosticsDir = home .. "/.codex/codex-preset-diagnostics"
@@ -17,40 +18,11 @@ local codexPresetActiveContext = nil
 local codexPresetScopeLabel = "当前侧栏"
 local codexPresetStage = "idle"
 
-local codexPresets = {
-  ["luna-max"] = {
-    label = "Luna Max",
-    model = "GPT-5.6 Luna",
-    modelKey = "5.6-luna",
-    effortIndex = 5,
-    effortKey = "max",
-    effortLabels = {"最高", "max"},
-  },
-  ["terra-high"] = {
-    label = "Terra High",
-    model = "GPT-5.6 Terra",
-    modelKey = "5.6-terra",
-    effortIndex = 3,
-    effortKey = "high",
-    effortLabels = {"高", "high"},
-  },
-  ["sol-medium"] = {
-    label = "Sol Medium",
-    model = "GPT-5.6 Sol",
-    modelKey = "5.6-sol",
-    effortIndex = 2,
-    effortKey = "medium",
-    effortLabels = {"中", "标准", "medium", "standard"},
-  },
-  ["sol-high"] = {
-    label = "Sol High",
-    model = "GPT-5.6 Sol",
-    modelKey = "5.6-sol",
-    effortIndex = 3,
-    effortKey = "high",
-    effortLabels = {"高", "high"},
-  },
-}
+local codexPresets = {}
+local codexPresetList = {}
+local codexPresetConfigVersion = nil
+local codexPresetConfigSource = nil
+local codexPresetConfigError = nil
 
 local function codexNotify(message)
   hs.printf("Codex preset (%s): %s", codexPresetScopeLabel, message)
@@ -64,6 +36,292 @@ local function readFile(path)
   file:close()
   return contents
 end
+
+-- Keep a first-run fallback so the module can still be loaded before the
+-- user-level JSON has been installed. Actions remain disabled until the JSON
+-- validates, so a missing or malformed file can never trigger a UI change.
+local defaultPresetDefinitions = {
+  {
+    id = "gpt6-astra-max",
+    label = "GPT-6 Astra Max",
+    group = "GPT-6",
+    model = "gpt-6-astra",
+    model_label = "GPT-6 Astra",
+    effort = "max",
+    effort_index = 5,
+    aliases = {},
+    enabled = true,
+    legacy = false,
+  },
+  {
+    id = "gpt6-sol-high",
+    label = "GPT-6 Sol High",
+    group = "GPT-6",
+    model = "gpt-6-sol",
+    model_label = "GPT-6 Sol",
+    effort = "high",
+    effort_index = 3,
+    aliases = {},
+    enabled = true,
+    legacy = false,
+  },
+  {
+    id = "gpt6-sol-medium",
+    label = "GPT-6 Sol Medium",
+    group = "GPT-6",
+    model = "gpt-6-sol",
+    model_label = "GPT-6 Sol",
+    effort = "medium",
+    effort_index = 2,
+    aliases = {},
+    enabled = true,
+    legacy = false,
+  },
+  {
+    id = "gpt6-luna-max",
+    label = "GPT-6 Luna Max",
+    group = "GPT-6",
+    model = "gpt-6-luna",
+    model_label = "GPT-6 Luna",
+    effort = "max",
+    effort_index = 5,
+    aliases = {},
+    enabled = true,
+    legacy = false,
+  },
+  {
+    id = "luna-max",
+    label = "GPT-5.6 Luna Max",
+    group = "GPT-5.6 兼容",
+    model = "gpt-5.6-luna",
+    model_label = "GPT-5.6 Luna",
+    effort = "max",
+    effort_index = 5,
+    aliases = {},
+    enabled = true,
+    legacy = true,
+  },
+  {
+    id = "terra-high",
+    label = "GPT-5.6 Terra High",
+    group = "GPT-5.6 兼容",
+    model = "gpt-5.6-terra",
+    model_label = "GPT-5.6 Terra",
+    effort = "high",
+    effort_index = 3,
+    aliases = {},
+    enabled = true,
+    legacy = true,
+  },
+  {
+    id = "sol-medium",
+    label = "GPT-5.6 Sol Medium",
+    group = "GPT-5.6 兼容",
+    model = "gpt-5.6-sol",
+    model_label = "GPT-5.6 Sol",
+    effort = "medium",
+    effort_index = 2,
+    aliases = {},
+    enabled = true,
+    legacy = true,
+  },
+  {
+    id = "sol-high",
+    label = "GPT-5.6 Sol High",
+    group = "GPT-5.6 兼容",
+    model = "gpt-5.6-sol",
+    model_label = "GPT-5.6 Sol",
+    effort = "high",
+    effort_index = 3,
+    aliases = {},
+    enabled = true,
+    legacy = true,
+  },
+}
+
+local supportedEfforts = {
+  low = true,
+  medium = true,
+  high = true,
+  xhigh = true,
+  max = true,
+  ultra = true,
+}
+
+local effortAliases = {
+  standard = "medium",
+  light = "low",
+  minimal = "low",
+  ["very-high"] = "xhigh",
+  ["very high"] = "xhigh",
+  ["extra-high"] = "xhigh",
+  ["extra high"] = "xhigh",
+}
+
+local effortLabelsByKey = {
+  low = {"低", "low", "light", "minimal"},
+  medium = {"中", "标准", "medium", "standard"},
+  high = {"高", "high"},
+  xhigh = {"极高", "xhigh", "very high", "extra high"},
+  max = {"最高", "max", "highest"},
+  ultra = {"ultra", "极限"},
+}
+
+local modelEffortSuffixes = {
+  low = true,
+  medium = true,
+  standard = true,
+  high = true,
+  xhigh = true,
+  veryhigh = true,
+  extrahigh = true,
+  max = true,
+  highest = true,
+  ultra = true,
+}
+
+local function normalizeModelToken(value)
+  return tostring(value or ""):lower()
+    :gsub("gpt", "")
+    :gsub("[^%w%.]+", "")
+end
+
+local function canonicalEffortKey(value)
+  if type(value) ~= "string" then return nil end
+  local lower = value:lower()
+  if supportedEfforts[lower] then return lower end
+  return effortAliases[lower]
+end
+
+local function copyStrings(values)
+  local copy = {}
+  for _, value in ipairs(values or {}) do table.insert(copy, value) end
+  return copy
+end
+
+local function modelTextMatchesPreset(text, preset)
+  local compact = normalizeModelToken(text)
+  if compact == "" then return false end
+  for _, variant in ipairs(preset.modelVariants or {}) do
+    local target = normalizeModelToken(variant)
+    if target ~= "" then
+      if compact == target then return true end
+      if compact:sub(1, #target) == target then
+        local suffix = compact:sub(#target + 1)
+        if suffix == "" or modelEffortSuffixes[suffix] then return true end
+      end
+    end
+  end
+  return false
+end
+
+local function validatePresetDefinition(raw, index)
+  if type(raw) ~= "table" then return nil, "第 " .. index .. " 个预设不是对象" end
+  for _, field in ipairs({"id", "label", "group", "model", "model_label", "effort", "effort_index"}) do
+    if raw[field] == nil then
+      return nil, string.format("第 %d 个预设缺少 %s", index, field)
+    end
+  end
+  for _, field in ipairs({"id", "label", "group", "model", "model_label", "effort"}) do
+    if type(raw[field]) ~= "string" or raw[field] == "" then
+      return nil, string.format("第 %d 个预设的 %s 必须是非空字符串", index, field)
+    end
+  end
+  if not raw.id:match("^[A-Za-z0-9][A-Za-z0-9._-]*$") then
+    return nil, string.format("第 %d 个预设的 id 只能包含字母、数字、点、下划线和短横线", index)
+  end
+  if type(raw.effort_index) ~= "number"
+      or raw.effort_index < 1 or raw.effort_index % 1 ~= 0 then
+    return nil, string.format("第 %d 个预设的 effort_index 必须是正整数", index)
+  end
+  local effortKey = canonicalEffortKey(raw.effort)
+  if not effortKey then
+    return nil, string.format("第 %d 个预设的 effort 不受支持：%s", index, raw.effort)
+  end
+  if raw.aliases ~= nil and type(raw.aliases) ~= "table" then
+    return nil, string.format("第 %d 个预设的 aliases 必须是数组", index)
+  end
+  for _, alias in ipairs(raw.aliases or {}) do
+    if type(alias) ~= "string" or alias == "" then
+      return nil, string.format("第 %d 个预设的 aliases 只能包含非空字符串", index)
+    end
+  end
+  if raw.enabled ~= nil and type(raw.enabled) ~= "boolean" then
+    return nil, string.format("第 %d 个预设的 enabled 必须是布尔值", index)
+  end
+  if raw.legacy ~= nil and type(raw.legacy) ~= "boolean" then
+    return nil, string.format("第 %d 个预设的 legacy 必须是布尔值", index)
+  end
+  return {
+    id = raw.id,
+    label = raw.label,
+    group = raw.group,
+    model = raw.model,
+    modelLabel = raw.model_label,
+    modelKey = raw.model:lower(),
+    modelVariants = {raw.model, raw.model_label, table.unpack(raw.aliases or {})},
+    effortKey = effortKey,
+    effortIndex = raw.effort_index,
+    effortLabels = copyStrings(effortLabelsByKey[effortKey]),
+    aliases = copyStrings(raw.aliases),
+    enabled = raw.enabled ~= false,
+    legacy = raw.legacy == true,
+  }
+end
+
+local function installPresetDefinitions(config, source)
+  codexPresets = {}
+  codexPresetList = {}
+  if type(config) ~= "table" or config.version ~= 1 or type(config.presets) ~= "table"
+      or #config.presets == 0 then
+    codexPresetConfigError = "配置必须是 version=1 且包含非空 presets 数组"
+    return false
+  end
+  local seen = {}
+  for index, raw in ipairs(config.presets) do
+    local preset, err = validatePresetDefinition(raw, index)
+    if not preset then
+      codexPresetConfigError = err
+      codexPresets = {}
+      codexPresetList = {}
+      return false
+    end
+    if seen[preset.id] then
+      codexPresetConfigError = "预设 id 重复：" .. preset.id
+      codexPresets = {}
+      codexPresetList = {}
+      return false
+    end
+    seen[preset.id] = true
+    codexPresets[preset.id] = preset
+    table.insert(codexPresetList, preset)
+  end
+  codexPresetConfigVersion = config.version
+  codexPresetConfigSource = source
+  codexPresetConfigError = nil
+  return true
+end
+
+local function loadCodexPresetConfig()
+  local contents = readFile(codexPresetConfigPath)
+  if not contents then
+    installPresetDefinitions({version = 1, presets = defaultPresetDefinitions}, "embedded-default")
+    codexPresetConfigError = "找不到 " .. codexPresetConfigPath
+    return false, codexPresetConfigError
+  end
+  local ok, decoded = pcall(hs.json.decode, contents)
+  if not ok or type(decoded) ~= "table" then
+    codexPresets = {}
+    codexPresetList = {}
+    codexPresetConfigError = "JSON 格式无法解析"
+    return false, codexPresetConfigError
+  end
+  local installed = installPresetDefinitions(decoded, codexPresetConfigPath)
+  if not installed then return false, codexPresetConfigError end
+  return true, nil
+end
+
+loadCodexPresetConfig()
 
 local function axAttribute(element, name)
   local ok, value = pcall(function() return element:attributeValue(name) end)
@@ -94,12 +352,9 @@ local function axStrings(element)
 end
 
 local function modelKeyFromText(text)
-  local compact = tostring(text or ""):lower()
-    :gsub("gpt", "")
-    :gsub("[^%w%.]+", "")
-  if compact:find("5%.6luna") then return "5.6-luna" end
-  if compact:find("5%.6terra") then return "5.6-terra" end
-  if compact:find("5%.6sol") then return "5.6-sol" end
+  for _, preset in ipairs(codexPresetList) do
+    if modelTextMatchesPreset(text, preset) then return preset.modelKey end
+  end
   return nil
 end
 
@@ -221,6 +476,12 @@ local function writeDiagnostics(stage, context, details)
     codex_version = codexVersion(),
     stage = stage,
     scope = context and context.targetKind or details.scope or "unknown",
+    preset_config_source = codexPresetConfigSource,
+    preset_config_version = codexPresetConfigVersion,
+    preset_config_error = codexPresetConfigError,
+    preset_id = details.preset_id,
+    preset_model = details.preset_model,
+    preset_effort = details.preset_effort,
     selector_type = details.selector_type or "unknown",
     failure = details.failure,
     main_detected = details.main_detected,
@@ -752,7 +1013,10 @@ end
 local function selectorType(context)
   local text = axText(context.modelElement)
   if modelKeyFromText(text) then
-    for _, label in ipairs({"最高", "高", "标准", "中", "低", "max", "high", "standard", "medium", "low"}) do
+    for _, label in ipairs({
+      "最高", "极高", "极限", "高", "标准", "中", "低",
+      "ultra", "xhigh", "max", "high", "standard", "medium", "low",
+    }) do
       if text:lower():find(label:lower(), 1, true) then return "combined-picker" end
     end
   end
@@ -832,7 +1096,11 @@ local function effortKeyFromText(text)
   -- title to one semantic value before comparison instead of using substring
   -- matching, which previously accepted Sol 最高 as Sol High.
   if lower:find("最高", 1, true) or lower:find("max", 1, true) then return "max" end
-  if lower:find("极高", 1, true) or lower:find("very high", 1, true) then return "very-high" end
+  if lower:find("极限", 1, true) or lower:find("ultra", 1, true) then return "ultra" end
+  if lower:find("极高", 1, true) or lower:find("very high", 1, true)
+      or lower:find("extra high", 1, true) or lower:find("xhigh", 1, true) then
+    return "xhigh"
+  end
   if lower:find("高", 1, true) or lower:find("high", 1, true) then return "high" end
   if lower:find("标准", 1, true) or lower:find("中", 1, true)
       or lower:find("standard", 1, true) or lower:find("medium", 1, true) then
@@ -994,8 +1262,44 @@ local function readSideStatePreset()
   if not contents then return nil end
   local ok, state = pcall(hs.json.decode, contents)
   if not ok or type(state) ~= "table" then return nil end
-  if type(state.preset) ~= "string" or not codexPresets[state.preset] then return nil end
+  if type(state.preset) ~= "string"
+      or not codexPresets[state.preset]
+      or not codexPresets[state.preset].enabled then
+    return nil
+  end
   return state.preset
+end
+
+local function ensurePresetConfigFile()
+  if readFile(codexPresetConfigPath) then return true end
+  local parent = home .. "/.codex"
+  if not hs.fs.attributes(parent) then hs.fs.mkdir(parent) end
+  local tempPath = codexPresetConfigPath .. ".tmp"
+  local file = io.open(tempPath, "wb")
+  if not file then return false end
+  file:write(hs.json.encode({version = 1, presets = defaultPresetDefinitions}, true))
+  file:write("\n")
+  file:close()
+  return os.rename(tempPath, codexPresetConfigPath) ~= nil
+end
+
+local function openPresetConfig()
+  if not ensurePresetConfigFile() then
+    codexNotify("无法创建预设配置文件：" .. codexPresetConfigPath)
+    return
+  end
+  hs.task.new("/usr/bin/open", nil, {"-a", "TextEdit", codexPresetConfigPath}):start()
+  codexNotify("已打开预设配置；保存后点击 SwiftBar 的重新加载")
+end
+
+local function reloadPresetConfig()
+  local ok, err = loadCodexPresetConfig()
+  if ok then
+    codexNotify("预设配置已重新加载，共 " .. #codexPresetList .. " 个有效预设")
+  else
+    codexNotify("预设配置错误，未进行模型切换：" .. tostring(err))
+  end
+  refreshSwiftBarCodexPlugin()
 end
 
 local function dismissPresetPopover(context)
@@ -1029,6 +1333,9 @@ local function finishPreset(success, message)
   if not success then dismissPresetPopover(context) end
   local diagnosticDetails = {
     selector_type = context and selectorType(context) or "unknown",
+    preset_id = context and context.presetKey or nil,
+    preset_model = context and context.presetModel or nil,
+    preset_effort = context and context.presetEffort or nil,
     effort_reader = context and context.effortReader or nil,
     effort_reader_after_keys = context and context.effortReaderAfterKeys or nil,
     effort_index_before = context and context.effortIndexBefore or nil,
@@ -1065,6 +1372,9 @@ local sideScope = {
 }
 
 local function applyPresetAttempt(presetKey, preset, configBefore, context, attempt, scope)
+  context.presetKey = presetKey
+  context.presetModel = preset.model
+  context.presetEffort = preset.effortKey
   codexPresetStage = "open-picker"
   openStrengthPopover(context, function(chooseModelItem)
     if not chooseModelItem then
@@ -1103,6 +1413,9 @@ local function applyPresetAttempt(presetKey, preset, configBefore, context, atte
 
       local function configureStrength(refreshed, popoverAlreadyOpen)
         codexPresetActiveContext = refreshed
+        refreshed.presetKey = presetKey
+        refreshed.presetModel = preset.model
+        refreshed.presetEffort = preset.effortKey
 
         local function configureOpenPopover()
           local effortItem, effortFocusTarget = strengthPopover(refreshed)
@@ -1215,6 +1528,9 @@ local function applyPresetAttempt(presetKey, preset, configBefore, context, atte
                 local function verifyCommitted(attempt)
                   local verifiedContext = scope.findContext(refreshed.window)
                   if verifiedContext and not composerPopoverIsOpen(verifiedContext) then
+                    verifiedContext.presetKey = presetKey
+                    verifiedContext.presetModel = preset.model
+                    verifiedContext.presetEffort = preset.effortKey
                     if not verifyPreset(verifiedContext, preset) then
                       if attempt >= 20 then
                         finishPreset(false, "设置后回读不一致；未记录最近应用状态")
@@ -1326,9 +1642,14 @@ end
 
 local function applyCodexComposerPreset(presetKey, scope)
   codexPresetScopeLabel = scope.label
+  local configOK, configError = loadCodexPresetConfig()
+  if not configOK then
+    codexNotify("预设配置错误，未操作 Codex：" .. tostring(configError))
+    return
+  end
   local preset = codexPresets[presetKey]
-  if not preset then
-    codexNotify("已拒绝未知预设：" .. tostring(presetKey))
+  if not preset or not preset.enabled then
+    codexNotify("已拒绝未知或已停用预设：" .. tostring(presetKey))
     return
   end
   if codexPresetBusy then
@@ -1362,6 +1683,9 @@ local function applyCodexComposerPreset(presetKey, scope)
         return
       end
       codexPresetActiveContext = refreshed
+      refreshed.presetKey = presetKey
+      refreshed.presetModel = preset.model
+      refreshed.presetEffort = preset.effortKey
       applyPresetAttempt(presetKey, preset, configBefore, refreshed, 1, scope)
     end
     -- A newly opened Electron panel can enter the AX tree before its composer
@@ -1429,6 +1753,11 @@ end)
 
 hs.urlevent.bind("codex-side-open", function()
   codexPresetScopeLabel = sideScope.label
+  local configOK, configError = loadCodexPresetConfig()
+  if not configOK then
+    codexNotify("预设配置错误，未打开并应用侧栏：" .. tostring(configError))
+    return
+  end
   local recentPreset = readSideStatePreset()
   if recentPreset then
     applyCodexSidePreset(recentPreset)
@@ -1445,4 +1774,12 @@ end)
 
 hs.urlevent.bind("codex-preset-check", function()
   checkCodexPickerCompatibility()
+end)
+
+hs.urlevent.bind("codex-preset-reload", function()
+  reloadPresetConfig()
+end)
+
+hs.urlevent.bind("codex-preset-open-config", function()
+  openPresetConfig()
 end)

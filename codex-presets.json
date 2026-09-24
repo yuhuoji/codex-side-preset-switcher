@@ -1,0 +1,101 @@
+{
+  "version": 1,
+  "presets": [
+    {
+      "id": "gpt6-astra-max",
+      "label": "GPT-6 Astra Max",
+      "group": "GPT-6",
+      "model": "gpt-6-astra",
+      "model_label": "GPT-6 Astra",
+      "effort": "max",
+      "effort_index": 5,
+      "aliases": [],
+      "enabled": true,
+      "legacy": false
+    },
+    {
+      "id": "gpt6-sol-high",
+      "label": "GPT-6 Sol High",
+      "group": "GPT-6",
+      "model": "gpt-6-sol",
+      "model_label": "GPT-6 Sol",
+      "effort": "high",
+      "effort_index": 3,
+      "aliases": [],
+      "enabled": true,
+      "legacy": false
+    },
+    {
+      "id": "gpt6-sol-medium",
+      "label": "GPT-6 Sol Medium",
+      "group": "GPT-6",
+      "model": "gpt-6-sol",
+      "model_label": "GPT-6 Sol",
+      "effort": "medium",
+      "effort_index": 2,
+      "aliases": [],
+      "enabled": true,
+      "legacy": false
+    },
+    {
+      "id": "gpt6-luna-max",
+      "label": "GPT-6 Luna Max",
+      "group": "GPT-6",
+      "model": "gpt-6-luna",
+      "model_label": "GPT-6 Luna",
+      "effort": "max",
+      "effort_index": 5,
+      "aliases": [],
+      "enabled": true,
+      "legacy": false
+    },
+    {
+      "id": "luna-max",
+      "label": "GPT-5.6 Luna Max",
+      "group": "GPT-5.6 兼容",
+      "model": "gpt-5.6-luna",
+      "model_label": "GPT-5.6 Luna",
+      "effort": "max",
+      "effort_index": 5,
+      "aliases": [],
+      "enabled": true,
+      "legacy": true
+    },
+    {
+      "id": "terra-high",
+      "label": "GPT-5.6 Terra High",
+      "group": "GPT-5.6 兼容",
+      "model": "gpt-5.6-terra",
+      "model_label": "GPT-5.6 Terra",
+      "effort": "high",
+      "effort_index": 3,
+      "aliases": [],
+      "enabled": true,
+      "legacy": true
+    },
+    {
+      "id": "sol-medium",
+      "label": "GPT-5.6 Sol Medium",
+      "group": "GPT-5.6 兼容",
+      "model": "gpt-5.6-sol",
+      "model_label": "GPT-5.6 Sol",
+      "effort": "medium",
+      "effort_index": 2,
+      "aliases": [],
+      "enabled": true,
+      "legacy": true
+    },
+    {
+      "id": "sol-high",
+      "label": "GPT-5.6 Sol High",
+      "group": "GPT-5.6 兼容",
+      "model": "gpt-5.6-sol",
+      "model_label": "GPT-5.6 Sol",
+      "effort": "high",
+      "effort_index": 3,
+      "aliases": [],
+      "enabled": true,
+      "legacy": true
+    }
+  ]
+}

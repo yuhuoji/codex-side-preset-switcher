@@ -1,29 +1,95 @@
-# Codex 侧栏模型预设切换器
+# Codex 模型与推理强度快捷切换器
 
 [English](README_EN.md) | 简体中文
 
-一个用于切换 Codex Desktop 当前主线程或侧栏模型与推理强度的 macOS 菜单栏工具。
+这是一个 macOS 菜单栏工具，用于切换 Codex Desktop 当前主线程、侧栏，以及新任务默认使用的模型和推理强度。
 
-项目组合使用 [SwiftBar](https://github.com/swiftbar/SwiftBar)、[Hammerspoon](https://www.hammerspoon.org/) 与 macOS 辅助功能 API。切换过程不会移动或点击鼠标。
+它组合使用 [SwiftBar](https://github.com/swiftbar/SwiftBar)、[Hammerspoon](https://www.hammerspoon.org/) 和 macOS 辅助功能 API。切换过程只使用辅助功能动作、焦点和键盘方向键，不移动或模拟点击鼠标。
 
-> 这是一个非官方界面自动化项目。脚本会自动识别新版组合式选择器和旧版分离式选择器；遇到未知结构时会生成脱敏诊断并安全停止。
+> 这是非官方的界面自动化工具。Codex 更新后如果辅助功能结构发生变化，工具会安全失败并生成脱敏诊断，不会盲点其他对话。
+
+## 当前预设
+
+默认配置把 GPT-6 放在主菜单，把 GPT-5.6 保留为兼容回退组：
+
+- GPT-6 Astra Max
+- GPT-6 Sol High
+- GPT-6 Sol Medium
+- GPT-6 Luna Max
+- GPT-5.6 Luna Max
+- GPT-5.6 Terra High
+- GPT-5.6 Sol Medium
+- GPT-5.6 Sol High
+
+GPT-6 的具体可用性仍由当前 Codex 账户和客户端灰度决定；如果当前界面没有精确显示目标模型，工具会停止，不会选择相近模型。模型和推理强度控件位于 Codex Desktop 输入框下方，参见 [OpenAI Models 文档](https://learn.chatgpt.com/docs/models?translationFallback=ja-JP)。
+
+## 用 JSON 让 AI 修改预设
+
+唯一的预设配置是项目根目录的 [`codex-presets.json`](codex-presets.json)。实际运行路径是：
+
+```text
+~/.codex/codex-presets.json
+```
+
+本机默认安装会让运行路径指向项目里的 JSON，因此以后可以直接对 AI 说：
+
+> 请只修改 `codex-presets.json`：新增一个 GPT-6 Sol High 预设，保持 `version=1`，不要修改 Hammerspoon、SwiftBar 或 `config.toml`；修改后运行 JSON 校验。
+
+配置文件采用以下结构：
+
+```json
+{
+  "version": 1,
+  "presets": [
+    {
+      "id": "gpt6-sol-high",
+      "label": "GPT-6 Sol High",
+      "group": "GPT-6",
+      "model": "gpt-6-sol",
+      "model_label": "GPT-6 Sol",
+      "effort": "high",
+      "effort_index": 3,
+      "aliases": [],
+      "enabled": true,
+      "legacy": false
+    }
+  ]
+}
+```
+
+字段说明：
+
+- `id`：菜单和 URL 使用的稳定标识，只能包含字母、数字、点、下划线和短横线。已有的 `luna-max`、`terra-high`、`sol-medium`、`sol-high` 请不要改名，否则旧状态和旧链接无法复用。
+- `label`：SwiftBar 中显示的名称。
+- `group`：菜单分组名称，例如 `GPT-6`、`GPT-5.6 兼容` 或自定义分组。
+- `model`：模型 API ID，例如 `gpt-6-astra`、`gpt-6-sol`、`gpt-6-luna`。
+- `model_label`：Codex Desktop 中显示的模型名称，用于精确匹配。
+- `effort`：`low`、`medium`、`high`、`xhigh`、`max` 或 `ultra`。
+- `effort_index`：该模型在当前 UI 滑块中的档位，从 1 开始；需要和模型实际支持的档位数一致。
+- `aliases`：模型显示名称发生变化时可添加的精确别名，不用于模糊匹配。
+- `enabled`：设为 `false` 可以暂时隐藏预设；删除对象则彻底移除。
+- `legacy`：仅用于标记兼容预设，不会改变切换逻辑。
+
+修改后：
+
+1. 运行 `jq empty codex-presets.json`，或让 AI 运行 JSON 校验。
+2. 在 SwiftBar 中点击“重新加载预设配置”。
+3. 菜单会按 JSON 立即重新生成。配置损坏、ID 重复或字段缺失时只显示错误，不会操作 Codex。
+
+菜单也提供“打开/编辑预设配置（让 AI 修改此文件）”。它打开的是 `~/.codex/codex-presets.json`；如果该路径是仓库软链接，编辑结果会直接落到项目文件中。
 
 ## 功能
 
-- 一键切换当前主线程或侧栏的模型与推理强度：
-  - Luna Max
-  - Terra High
-  - Sol Medium
-  - Sol High
-- 打开侧栏并自动应用最近一次成功使用的侧栏预设。
-- 修改新建任务使用的 `model` 和 `model_reasoning_effort` 默认值。
-- 当前主线程、侧栏切换与 `~/.codex/config.toml` 全局配置相互隔离。
-- 操作开始时锁定当前获得焦点的 Codex 窗口，避免切换到其他对话。
-- 支持 Mac 内置屏幕和外接显示器，无需校准屏幕坐标。
-- 设置完成后回读模型与推理强度，验证成功才记录状态。
-- 从辅助功能树实时识别 `AXMenuItem`、`AXButton`、`AXRadioButton` 等可操作角色，不按 Codex 版本号或单一中文文案硬编码。
-- SwiftBar 提供“检查 Codex 控件兼容性”，只读取当前窗口控件，不切换模型。
-- 遇到未知预设、焦点丢失或控件不可用时安全停止。
+- 一键切换当前主线程或侧栏的模型与推理强度。
+- GPT-6 推荐组与 GPT-5.6 兼容组动态生成，不再把预设硬编码在两份脚本里。
+- 打开侧栏并应用最近一次成功使用的侧栏预设。
+- 通过“新任务默认配置”修改 `~/.codex/config.toml` 的 `model` 和 `model_reasoning_effort`；只有主动点击该组菜单时才会修改全局默认。
+- 主线程、侧栏切换不会修改 `config.toml`，并在操作前后检查内容不变。
+- 操作开始时锁定触发时的 Codex 窗口，适配内置屏和外接显示器。
+- 设置完成后回读模型和推理强度，验证成功后才记录最近状态。
+- 支持新版“模型 + 推理强度”组合选择器和旧版分离式选择器。
+- SwiftBar 提供控件兼容性检查和预设重新加载。
+- 失败时写入 `~/.codex/codex-preset-diagnostics/latest.json`，不记录对话内容或输入框文本。
 
 ## 环境要求
 
@@ -31,71 +97,51 @@
 - Codex Desktop
 - [Hammerspoon](https://www.hammerspoon.org/)
 - [SwiftBar](https://github.com/swiftbar/SwiftBar)
-- 在 **系统设置 → 隐私与安全性 → 辅助功能** 中允许 Hammerspoon 控制电脑
+- `/usr/bin/jq`
+- 在“系统设置 → 隐私与安全性 → 辅助功能”中允许 Hammerspoon 控制电脑
 
 ## 安装
 
-1. 将 Hammerspoon 模块复制到配置目录：
+在仓库目录执行：
 
-   ```sh
-   cp hammerspoon/codex-side-presets.lua ~/.hammerspoon/
-   ```
+```sh
+cp hammerspoon/codex-side-presets.lua ~/.hammerspoon/
+cp swiftbar/codex-model.1m.sh /你的/SwiftBar/插件目录/
+chmod +x /你的/SwiftBar/插件目录/codex-model.1m.sh
+```
 
-2. 在 `~/.hammerspoon/init.lua` 中加入：
+在 `~/.hammerspoon/init.lua` 中加入：
 
-   ```lua
-   dofile(os.getenv("HOME") .. "/.hammerspoon/codex-side-presets.lua")
-   ```
+```lua
+dofile(os.getenv("HOME") .. "/.hammerspoon/codex-side-presets.lua")
+```
 
-3. 将 SwiftBar 插件复制到 SwiftBar 偏好设置中选定的插件目录：
+如果 `~/.codex/codex-presets.json` 不存在，建议把它链接到仓库配置，方便以后让 AI 修改：
 
-   ```sh
-   cp swiftbar/codex-model.1m.sh /你的/SwiftBar/插件目录/
-   chmod +x /你的/SwiftBar/插件目录/codex-model.1m.sh
-   ```
+```sh
+ln -s /你的仓库绝对路径/codex-presets.json ~/.codex/codex-presets.json
+```
 
-4. 在 Hammerspoon 中执行 **Reload Config**，然后刷新 SwiftBar。
+如果该文件已经存在，请先保留现有配置，不要直接覆盖；运行端也支持普通 JSON 文件。完成后在 Hammerspoon 点击 **Reload config**，再刷新 SwiftBar。
 
 ## 使用方法
 
 点击菜单栏中的 SwiftBar 项目：
 
-- **新任务默认配置**：修改 `~/.codex/config.toml`，仅影响之后新建的任务。插件替换配置前会生成 `config.toml.swiftbar-backup` 备份。
-- **当前主线程**：只切换触发操作时所在窗口的主线程，不修改全局配置，也不操作侧栏。
-- **当前侧栏**：只切换当前打开的侧栏，不修改 Codex 全局配置。
-- **打开侧栏并应用最近预设**：优先通过 Codex 菜单项的辅助功能操作打开侧栏；菜单暂时不在辅助功能树中时，回退使用当前版本可用的 `⌘⌥S`，然后重新应用最近一次验证成功的预设。整个过程不移动鼠标。
-- **检查 Codex 控件兼容性**：只检查当前窗口中主线程、侧栏输入区能否被识别，并刷新菜单中的兼容性结果。
+- **新任务默认配置**：修改全局 `config.toml`，只影响之后新建的任务，并保留 `config.toml.swiftbar-backup` 备份。
+- **当前主线程**：只切换当前触发窗口的主线程，不修改全局配置或侧栏。
+- **当前侧栏**：只切换当前窗口右侧侧栏，不修改全局配置。
+- **打开侧栏并应用最近预设**：侧栏关闭时自动打开，然后应用最近一次验证成功的侧栏预设。
+- **检查 Codex 控件兼容性**：只读取当前窗口的主线程和侧栏控件，不切换模型。
+- **重新加载预设配置**：重新读取 JSON，不需要同时修改 Lua 或 Shell。
 
-菜单中的“最近成功”是历史记录，不是实时读取结果。你之后在 Codex 中手动调整模型或推理强度时，脚本不会覆盖；只有再次点击预设才会执行切换。
+“最近成功”是历史记录，不是实时读取结果。你在 Codex 中手动调整后，工具不会覆盖，只有再次点击预设才会切换。
 
-## 工作原理
+## 工作原理与安全边界
 
-Hammerspoon 模块会：
+Hammerspoon 会锁定触发时的 Codex 窗口，通过辅助功能树查找目标输入区，并按主线程/侧栏的相对位置区分两个选择器。模型名称按 `model`、`model_label` 和 `aliases` 精确匹配；推理强度先读取当前档位，只发送需要的左右方向键，不先归零、不进行第二轮校正。
 
-1. 锁定触发操作时获得焦点的 Codex 窗口。
-2. 在该窗口中查找模型控件：最左侧属于主线程，存在第二个控件时最右侧属于侧栏。
-3. 根据实时辅助功能结构选择新版组合式或旧版分离式适配器，并用控件与输入区的相对位置锁定弹层。
-4. 归一化模型名称后精确匹配，通过辅助功能的 `AXPress` 选择模型；不可用时不会选择近似项。
-5. 聚焦推理强度控件，读取当前档位和总档位数后，只发送一次所需差值的左右方向键，不先归零、不二次校正。
-6. 用 `Escape` 提交并关闭弹窗，回读辅助功能状态，并确认 `config.toml` 没有变化。
-7. 将最近成功的主线程和侧栏预设分别写入 `~/.codex/codex-main-preset-state.json` 与 `~/.codex/codex-side-preset-state.json`。
-
-最近一次兼容性检查或失败阶段记录在 `~/.codex/codex-preset-diagnostics/latest.json`。文件只包含 Codex 版本、控件角色、选择器类型、相对位置和失败阶段，不读取或记录对话内容、输入框文本。
-
-实现中不使用全局鼠标监听、鼠标移动、模拟点击或固定屏幕坐标。
-
-## 已知限制
-
-- 当前预设面向 Codex Desktop 中显示的 GPT-5.6 Luna、Terra 和 Sol。
-- 当前实现假定：同一 Codex 对话窗口中最左侧模型控件属于主线程；出现两个模型控件时，最右侧属于侧栏。
-- Codex Desktop 修改模型名称或辅助功能结构后仍可能失效。此时脚本会显示 Hammerspoon 通知、写入诊断并停止，不会盲点或回退操作主对话输入区。
-- 切换当前主线程或侧栏时需要让 Codex 短暂置于前台，因为推理强度滑块需要键盘焦点。
-
-## 安全说明
-
-- 首次使用前建议自行备份 `~/.codex/config.toml`。
-- Codex 模型更新后，请检查两个脚本中的预设模型标识。
-- 不建议加入鼠标坐标兜底逻辑，否则可能在多窗口或多显示器环境下操作错误的对话。
+切换主线程或侧栏时不会写入 `config.toml`，也不使用鼠标移动、全局鼠标监听、固定屏幕坐标或模拟鼠标点击。Codex 更新导致控件无法识别时，脚本会停止、通知并写诊断文件。
 
 ## 许可证
 
